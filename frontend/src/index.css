@@ -1,0 +1,73 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --aurora: linear-gradient(135deg, #4da6ff, #6366f1);
+}
+
+html {
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+body {
+  background: #090d18;
+  color: #f0f6ff;
+  font-family: 'Space Grotesk', system-ui, sans-serif;
+  line-height: 1.5;
+}
+
+.mono,
+.amount {
+  font-variant-numeric: tabular-nums;
+}
+
+.grad-text {
+  background: var(--aurora);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+/* scrollbar discreta */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 999px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* inputs base */
+.field {
+  @apply w-full bg-void border border-line rounded-s px-3 py-2 text-paper text-sm outline-none transition-colors;
+}
+.field:focus {
+  @apply border-azure;
+}
+.field::placeholder {
+  color: #56627e;
+}
+
+.label-cap {
+  font-size: 11px;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  font-weight: 600;
+}
+
+/* Remove as setas nativas (feias) dos inputs numéricos — visual limpo/premium */
+input[type='number']::-webkit-outer-spin-button,
+input[type='number']::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+input[type='number'] {
+  -moz-appearance: textfield;
+  appearance: textfield;
+}
