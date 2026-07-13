@@ -21,7 +21,7 @@ function relevantSection(text) {
 }
 
 export async function extractTransactionsFromText(text) {
-  const apiKey = getGroqKey();
+  const apiKey = await getGroqKey();
   if (!apiKey) return { bank: 'PDF', format: 'pdf', referenceMonth: null, transactions: [] };
 
   const year = (text.match(/\b(20\d{2})\b/) || [])[1] || String(new Date().getFullYear());

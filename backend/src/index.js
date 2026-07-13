@@ -9,6 +9,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 // .env mora na raiz do monorepo
 dotenv.config({ path: join(__dirname, '..', '..', '.env') });
 
+import { connect, initSchema } from './db.js';
 import peopleRouter from './routes/people.js';
 import sourcesRouter from './routes/sources.js';
 import categoriesRouter from './routes/categories.js';
@@ -52,6 +53,15 @@ app.use((err, _req, res, _next) => {
 });
 
 const PORT = process.env.PORT || 3001;
-app.listen(PORT, () => {
-  console.log(`OPF backend rodando em http://localhost:${PORT}`);
-});
+
+// Bootstrap: conecta ao MongoDB e prepara índices/seeds antes de aceitar requisições.
+try {
+  await connect();
+  await initSchema();
+  app.listen(PORT, () => {
+    console.log(`OPF backend rodando em http://localhost:${PORT}`);
+  });
+} catch (err) {
+  console.error('Falha ao iniciar o backend (MongoDB):', err.message);
+  process.exit(1);
+}

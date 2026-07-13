@@ -1,4 +1,4 @@
-import db from '../db.js';
+import { col } from '../db.js';
 
 // Normaliza o memo: minúsculas, sem acentos, sem números de parcela, sem caracteres especiais.
 export function normalizeMemo(memo) {
@@ -14,38 +14,40 @@ export function normalizeMemo(memo) {
 }
 
 // Registra (ou reforça) classificação manual: memo -> categoria + pessoa.
-export function recordLearning(memo, categoria, personName) {
+// _id = memo_normalized dá a semântica do ON CONFLICT(memo_normalized) via upsert.
+export async function recordLearning(memo, categoria, personName) {
   const norm = normalizeMemo(memo);
   if (!norm || !categoria) return;
-  db.prepare(`
-    INSERT INTO classification_history (memo_normalized, categoria, person_name, uses, last_used_at)
-    VALUES (?, ?, ?, 1, datetime('now'))
-    ON CONFLICT(memo_normalized) DO UPDATE SET
-      categoria = excluded.categoria,
-      person_name = excluded.person_name,
-      uses = uses + 1,
-      last_used_at = datetime('now')
-  `).run(norm, categoria, personName || null);
+  await col.learning().updateOne(
+    { _id: norm },
+    {
+      $set: { memo_normalized: norm, categoria, person_name: personName || null, last_used_at: new Date().toISOString() },
+      $inc: { uses: 1 }
+    },
+    { upsert: true }
+  );
 }
 
 // Correspondência exata no histórico local (prioridade sobre a IA).
-export function lookupLearning(memo) {
+export async function lookupLearning(memo) {
   const norm = normalizeMemo(memo);
   if (!norm) return null;
-  const row = db.prepare('SELECT categoria, person_name FROM classification_history WHERE memo_normalized = ?').get(norm);
+  const row = await col.learning().findOne({ _id: norm });
   if (row) {
-    db.prepare("UPDATE classification_history SET uses = uses + 1, last_used_at = datetime('now') WHERE memo_normalized = ?").run(norm);
+    await col.learning().updateOne(
+      { _id: norm },
+      { $inc: { uses: 1 }, $set: { last_used_at: new Date().toISOString() } }
+    );
     return { categoria: row.categoria, person: row.person_name };
   }
   return null;
 }
 
 // Exemplos mais relevantes para o prompt da Groq.
-export function getLearningExamples(limit = 30) {
-  return db.prepare(`
-    SELECT memo_normalized, categoria, person_name
-    FROM classification_history
-    ORDER BY uses DESC, last_used_at DESC
-    LIMIT ?
-  `).all(limit);
+export async function getLearningExamples(limit = 30) {
+  return col.learning()
+    .find({}, { projection: { _id: 0, memo_normalized: 1, categoria: 1, person_name: 1 } })
+    .sort({ uses: -1, last_used_at: -1 })
+    .limit(limit)
+    .toArray();
 }

@@ -1,12 +1,13 @@
 import { Router } from 'express';
 import multer from 'multer';
 import pdfParse from 'pdf-parse/lib/pdf-parse.js';
-import db from '../db.js';
+import { col, nextId } from '../db.js';
 import { parseOfx } from '../parsers/ofx.js';
 import { parseSantanderPdf } from '../parsers/pdf-santander.js';
 import { classifyBatch } from '../ai/classify.js';
 import { lookupLearning, getLearningExamples, recordLearning, normalizeMemo } from '../ai/learning.js';
 import { invoiceMonth } from '../lib/invoice.js';
+import { parseAmount } from '../lib/money.js';
 import { aiEnabled } from './settings.js';
 import { extractTransactionsFromText } from '../ai/extract.js';
 
@@ -37,7 +38,7 @@ router.post('/preview', upload.single('file'), async (req, res, next) => {
       // PDF: a extração por IA é mais robusta entre layouts (pega Despesas + Parcelamentos de
       // todos os cartões, inclusive anuidade). O parser determinístico é o fallback.
       const deterministic = parseSantanderPdf(text);
-      if (aiEnabled('import')) {
+      if (await aiEnabled('import')) {
         try {
           const ai = await extractTransactionsFromText(text);
           parsed = ai.transactions.length >= deterministic.transactions.length ? ai : deterministic;
@@ -51,7 +52,7 @@ router.post('/preview', upload.single('file'), async (req, res, next) => {
     }
 
     const source = req.body.source_id
-      ? db.prepare('SELECT * FROM sources WHERE id = ?').get(Number(req.body.source_id))
+      ? await col.sources().findOne({ _id: Number(req.body.source_id) })
       : null;
 
     // cartão de crédito com fechamento: recalcula mês de referência (compras após o fechamento → próxima fatura)
@@ -78,7 +79,9 @@ router.post('/preview', upload.single('file'), async (req, res, next) => {
     }));
 
     // ---- Dedup ----
-    const existingFitids = new Set(db.prepare('SELECT fitid FROM transactions WHERE fitid IS NOT NULL').all().map((r) => r.fitid));
+    const existingFitids = new Set(
+      (await col.transactions().find({ fitid: { $ne: null } }, { projection: { fitid: 1 } }).toArray()).map((r) => r.fitid)
+    );
     const seen = new Set();
     for (const it of items) {
       let dup = false;
@@ -88,7 +91,7 @@ router.post('/preview', upload.single('file'), async (req, res, next) => {
       else {
         seen.add(sig);
         if (!it.fitid) {
-          const ex = db.prepare('SELECT 1 FROM transactions WHERE date=? AND amount=? AND reference_month=?').get(it.date, it.amount, it.reference_month);
+          const ex = await col.transactions().findOne({ date: it.date, amount: it.amount, reference_month: it.reference_month });
           if (ex) dup = true;
         }
       }
@@ -96,12 +99,12 @@ router.post('/preview', upload.single('file'), async (req, res, next) => {
     }
 
     // ---- Sugestões: histórico local → IA ----
-    const categories = db.prepare('SELECT name FROM categories ORDER BY name').all().map((r) => r.name);
-    const people = db.prepare('SELECT name FROM people ORDER BY name').all().map((r) => r.name);
+    const categories = (await col.categories().find({}, { projection: { name: 1, _id: 0 } }).sort({ name: 1 }).toArray()).map((r) => r.name);
+    const people = (await col.people().find({}, { projection: { name: 1, _id: 0 } }).sort({ name: 1 }).toArray()).map((r) => r.name);
 
     const needAi = [];
     for (const it of items) {
-      const local = lookupLearning(it.memo);
+      const local = await lookupLearning(it.memo);
       if (local) {
         it.suggested_category = local.categoria;
         it.suggested_person = local.person;
@@ -115,9 +118,9 @@ router.post('/preview', upload.single('file'), async (req, res, next) => {
     }
 
     let aiError = null;
-    if (needAi.length && aiEnabled('import')) {
+    if (needAi.length && await aiEnabled('import')) {
       try {
-        const examples = getLearningExamples(30);
+        const examples = await getLearningExamples(30);
         const results = await classifyBatch({ categories, people, examples, items: needAi });
         const map = new Map(results.map((r) => [r.key, r]));
         for (const it of needAi) {
@@ -137,7 +140,7 @@ router.post('/preview', upload.single('file'), async (req, res, next) => {
       bank: parsed.bank,
       format: parsed.format,
       referenceMonth: parsed.referenceMonth || null,
-      source: source ? { id: source.id, name: source.name, type: source.type } : null,
+      source: source ? { id: source._id, name: source.name, type: source.type } : null,
       aiError: aiError || aiExtractError,
       items
     });
@@ -145,46 +148,51 @@ router.post('/preview', upload.single('file'), async (req, res, next) => {
 });
 
 // POST /api/import/confirm  { source_id, items:[{... person_id, category_id}] }
-router.post('/confirm', (req, res) => {
-  const { source_id, items } = req.body;
-  if (!Array.isArray(items)) return res.status(400).json({ error: 'items inválido' });
-  const defaultPerson = db.prepare('SELECT id FROM people WHERE is_self=1 ORDER BY id LIMIT 1').get()?.id
-    || db.prepare('SELECT id FROM people ORDER BY id LIMIT 1').get()?.id;
+router.post('/confirm', async (req, res, next) => {
+  try {
+    const { source_id, items } = req.body;
+    if (!Array.isArray(items)) return res.status(400).json({ error: 'items inválido' });
+    const defaultPerson = (await col.people().findOne({ is_self: 1 }, { sort: { _id: 1 }, projection: { _id: 1 } }))?._id
+      || (await col.people().findOne({}, { sort: { _id: 1 }, projection: { _id: 1 } }))?._id;
 
-  const insert = db.prepare(`
-    INSERT INTO transactions
-      (fitid, person_id, source_id, category_id, type, reference_month, date, description, memo_original, amount, installment, source, ai_suggested, confirmed)
-    VALUES (@fitid, @person_id, @source_id, @category_id, @type, @reference_month, @date, @description, @memo_original, @amount, @installment, @source, @ai_suggested, 1)
-    ON CONFLICT(fitid) DO NOTHING
-  `);
-
-  let saved = 0, skipped = 0;
-  db.transaction((list) => {
-    for (const it of list) {
+    let saved = 0, skipped = 0;
+    for (const it of items) {
       if (it.exclude) { skipped++; continue; }
-      const info = insert.run({
-        fitid: it.fitid || null,
-        person_id: it.person_id || defaultPerson,   // despacha para a pessoa classificada
-        source_id: source_id || null,               // etiqueta com o cartão de origem
-        category_id: it.category_id || null,
-        type: it.type || 'expense',
-        reference_month: it.reference_month || (it.date ? it.date.slice(0, 7) : null),
-        date: it.date,
-        description: it.description || it.memo || '',
-        memo_original: it.memo || it.description || '',
-        amount: Math.abs(Number(it.amount)),
-        installment: it.installment || null,
-        source: it.source || 'import',
-        ai_suggested: it.suggestion_source === 'ai' ? 1 : 0
-      });
-      if (info.changes > 0) {
+      const amount = parseAmount(it.amount);
+      if (Number.isNaN(amount)) { skipped++; continue; } // valor inválido não entra
+      const _id = await nextId('transactions');
+      try {
+        // ON CONFLICT(fitid) DO NOTHING — o índice único parcial em fitid rejeita duplicatas.
+        await col.transactions().insertOne({
+          _id,
+          fitid: it.fitid || null,
+          person_id: it.person_id || defaultPerson,   // despacha para a pessoa classificada
+          source_id: source_id || null,               // etiqueta com o cartão de origem
+          category_id: it.category_id || null,
+          counterparty_person_id: null,
+          type: it.type || 'expense',
+          reference_month: it.reference_month || (it.date ? it.date.slice(0, 7) : null),
+          date: it.date,
+          description: it.description || it.memo || '',
+          memo_original: it.memo || it.description || '',
+          amount,
+          installment: it.installment || null,
+          source: it.source || 'import',
+          ai_suggested: it.suggestion_source === 'ai' ? 1 : 0,
+          confirmed: 1,
+          recurring_id: null,
+          created_at: new Date().toISOString()
+        });
         saved++;
-        if (it.category_name) recordLearning(it.memo || it.description, it.category_name, it.person_name || null);
-      } else skipped++;
+        if (it.category_name) await recordLearning(it.memo || it.description, it.category_name, it.person_name || null);
+      } catch (e) {
+        if (e.code === 11000) skipped++;
+        else throw e;
+      }
     }
-  })(items);
 
-  res.json({ saved, skipped });
+    res.json({ saved, skipped });
+  } catch (err) { next(err); }
 });
 
 export default router;

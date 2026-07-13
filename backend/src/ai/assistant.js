@@ -5,7 +5,7 @@ const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions';
 const MODEL = 'llama-3.3-70b-versatile';
 
 async function groqChat(messages, { temperature = 0.3 } = {}) {
-  const apiKey = getGroqKey();
+  const apiKey = await getGroqKey();
   if (!apiKey) throw Object.assign(new Error('Groq não configurada'), { status: 400 });
   const resp = await fetch(GROQ_URL, {
     method: 'POST',

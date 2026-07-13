@@ -1,7 +1,16 @@
-import db from '../db.js';
+import { col } from '../db.js';
+import { num } from './money.js';
 
 // Convenção v2: amount é magnitude positiva; a direção vem do type.
-//
+
+// Mapa id -> type das fontes (coleção pequena; usado para saber o que é cartão de crédito).
+async function sourceTypeMap() {
+  const sources = await col.sources().find({}, { projection: { _id: 1, type: 1 } }).toArray();
+  const m = new Map();
+  for (const s of sources) m.set(s._id, s.type);
+  return m;
+}
+
 // CAIXA da pessoa (dinheiro disponível) — despesa em cartão NÃO entra até a fatura ser paga:
 //   caixa = initial_balance
 //     + receitas
@@ -9,52 +18,60 @@ import db from '../db.js';
 //     − pagamentos de fatura feitos
 //     − transferências enviadas
 //     + transferências recebidas
-export function personCashBalance(personId) {
-  const p = db.prepare('SELECT initial_balance FROM people WHERE id = ?').get(personId);
+export async function personCashBalance(personId) {
+  const p = await col.people().findOne({ _id: personId }, { projection: { initial_balance: 1 } });
   if (!p) return 0;
-  const row = db.prepare(`
-    SELECT
-      COALESCE(SUM(CASE WHEN t.type='income' THEN t.amount ELSE 0 END),0) AS income,
-      COALESCE(SUM(CASE WHEN t.type='expense' AND (s.type IS NULL OR s.type != 'credit_card') THEN t.amount ELSE 0 END),0) AS cash_expense,
-      COALESCE(SUM(CASE WHEN t.type='payment' THEN t.amount ELSE 0 END),0) AS payments,
-      COALESCE(SUM(CASE WHEN t.type='transfer' THEN t.amount ELSE 0 END),0) AS sent
-    FROM transactions t LEFT JOIN sources s ON s.id = t.source_id
-    WHERE t.person_id = ?
-  `).get(personId);
-  const received = db.prepare(`
-    SELECT COALESCE(SUM(amount),0) AS v FROM transactions WHERE type='transfer' AND counterparty_person_id = ?
-  `).get(personId).v;
-  return p.initial_balance + row.income - row.cash_expense - row.payments - row.sent + received;
+  const types = await sourceTypeMap();
+  const txs = await col.transactions()
+    .find({ $or: [{ person_id: personId }, { type: 'transfer', counterparty_person_id: personId }] })
+    .toArray();
+
+  let income = 0, cashExpense = 0, payments = 0, sent = 0, received = 0;
+  for (const t of txs) {
+    if (t.type === 'transfer' && t.counterparty_person_id === personId) received += num(t.amount);
+    if (t.person_id !== personId) continue;
+    if (t.type === 'income') income += num(t.amount);
+    else if (t.type === 'expense') {
+      const st = t.source_id != null ? types.get(t.source_id) : null;
+      if (st !== 'credit_card') cashExpense += num(t.amount); // NULL ou não-cartão entram no caixa
+    } else if (t.type === 'payment') payments += num(t.amount);
+    else if (t.type === 'transfer') sent += num(t.amount);
+  }
+  return num(p.initial_balance) + income - cashExpense - payments - sent + received;
 }
 
 // DÍVIDA/FATURA de um cartão = despesas no cartão − pagamentos ao cartão.
-export function cardDebt(sourceId) {
-  const row = db.prepare(`
-    SELECT
-      COALESCE(SUM(CASE WHEN type='expense' THEN amount ELSE 0 END),0) AS expenses,
-      COALESCE(SUM(CASE WHEN type='payment' THEN amount ELSE 0 END),0) AS payments
-    FROM transactions WHERE source_id = ?
-  `).get(sourceId);
-  return { expenses: row.expenses, payments: row.payments, debt: row.expenses - row.payments };
+export async function cardDebt(sourceId) {
+  const txs = await col.transactions()
+    .find({ source_id: sourceId }, { projection: { type: 1, amount: 1 } })
+    .toArray();
+  let expenses = 0, payments = 0;
+  for (const t of txs) {
+    if (t.type === 'expense') expenses += num(t.amount);
+    else if (t.type === 'payment') payments += num(t.amount);
+  }
+  return { expenses, payments, debt: expenses - payments };
 }
 
 // ACERTO por pessoa (quem deve a quem):
 //   acerto = gastos no cartão (de crédito) − pagamentos feitos − transf. enviadas + transf. recebidas
 //   > 0 → a pessoa deve ao grupo;  < 0 → o grupo deve a ela.
-export function settlement() {
-  const people = db.prepare('SELECT id, name FROM people ORDER BY name').all();
+export async function settlement() {
+  const people = await col.people().find({}, { projection: { _id: 1, name: 1 } }).sort({ name: 1 }).toArray();
+  const types = await sourceTypeMap();
+  const txs = await col.transactions().find({}).toArray();
+
   const rows = people.map((p) => {
-    const r = db.prepare(`
-      SELECT
-        COALESCE(SUM(CASE WHEN t.type='expense' AND s.type='credit_card' THEN t.amount ELSE 0 END),0) AS card_exp,
-        COALESCE(SUM(CASE WHEN t.type='payment' THEN t.amount ELSE 0 END),0) AS payments,
-        COALESCE(SUM(CASE WHEN t.type='transfer' THEN t.amount ELSE 0 END),0) AS sent
-      FROM transactions t LEFT JOIN sources s ON s.id = t.source_id
-      WHERE t.person_id = ?
-    `).get(p.id);
-    const received = db.prepare("SELECT COALESCE(SUM(amount),0) AS v FROM transactions WHERE type='transfer' AND counterparty_person_id = ?").get(p.id).v;
-    const acerto = r.card_exp - r.payments - r.sent + received;
-    return { person_id: p.id, name: p.name, acerto: Math.round(acerto * 100) / 100 };
+    let cardExp = 0, payments = 0, sent = 0, received = 0;
+    for (const t of txs) {
+      if (t.type === 'transfer' && t.counterparty_person_id === p._id) received += num(t.amount);
+      if (t.person_id !== p._id) continue;
+      if (t.type === 'expense' && t.source_id != null && types.get(t.source_id) === 'credit_card') cardExp += num(t.amount);
+      else if (t.type === 'payment') payments += num(t.amount);
+      else if (t.type === 'transfer') sent += num(t.amount);
+    }
+    const acerto = cardExp - payments - sent + received;
+    return { person_id: p._id, name: p.name, acerto: Math.round(acerto * 100) / 100 };
   });
 
   // sugestão de acerto (greedy): devedores transferem para credores

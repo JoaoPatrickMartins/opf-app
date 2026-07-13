@@ -1,130 +1,110 @@
-import Database from 'better-sqlite3';
+import { MongoClient } from 'mongodb';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { mkdirSync } from 'node:fs';
+import dotenv from 'dotenv';
 
+// .env mora na raiz do monorepo (mesmo caminho usado pelo index.js)
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const dataDir = join(__dirname, '..', 'data');
-mkdirSync(dataDir, { recursive: true });
+dotenv.config({ path: join(__dirname, '..', '..', '.env') });
 
-const db = new Database(join(dataDir, 'finance.db'));
-db.pragma('journal_mode = WAL');
-db.pragma('foreign_keys = ON');
+const URI = process.env.MONGODB_URI;
+const DB_NAME = process.env.MONGODB_DB || 'opf';
 
-// ---- v2: recomeço limpo — remove o esquema legado da v1 (conta+subconta) se presente ----
-const hasLegacyAccounts = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='accounts'").get();
-const txCols = db.prepare('PRAGMA table_info(transactions)').all();
-const txIsLegacy = txCols.length && !txCols.some((c) => c.name === 'person_id');
-if (hasLegacyAccounts || txIsLegacy) {
-  db.exec(`
-    DROP TABLE IF EXISTS transactions;
-    DROP TABLE IF EXISTS subaccounts;
-    DROP TABLE IF EXISTS accounts;
-    DROP TABLE IF EXISTS recurring_rules;
-    DROP TABLE IF EXISTS classification_history;
-  `);
+if (!URI) {
+  throw new Error('MONGODB_URI não configurada — defina no .env da raiz do projeto.');
 }
 
-// ---- Esquema v2 ----
-db.exec(`
-  -- Pessoas / "contas": Própria, Sogra, Esposa…
-  CREATE TABLE IF NOT EXISTS people (
-    id INTEGER PRIMARY KEY,
-    name TEXT NOT NULL,
-    is_self INTEGER DEFAULT 0,
-    initial_balance REAL DEFAULT 0,
-    color TEXT,
-    created_at TEXT DEFAULT (datetime('now'))
+const client = new MongoClient(URI);
+let _db = null;
+
+// Conecta ao Atlas. Chamado uma vez no bootstrap do servidor (index.js).
+export async function connect() {
+  if (_db) return _db;
+  await client.connect();
+  _db = client.db(DB_NAME);
+  return _db;
+}
+
+export function getDb() {
+  if (!_db) throw new Error('MongoDB não conectado — chame connect() antes.');
+  return _db;
+}
+
+// Getters de coleção (mesmos nomes das tabelas v2).
+export const col = {
+  people: () => getDb().collection('people'),
+  sources: () => getDb().collection('sources'),
+  categories: () => getDb().collection('categories'),
+  transactions: () => getDb().collection('transactions'),
+  recurring: () => getDb().collection('recurring_rules'),
+  learning: () => getDb().collection('classification_history'),
+  settings: () => getDb().collection('settings'),
+  counters: () => getDb().collection('counters')
+};
+
+// Emula AUTOINCREMENT do SQLite: sequência por coleção guardada em `counters`.
+export async function nextId(name) {
+  const doc = await col.counters().findOneAndUpdate(
+    { _id: name },
+    { $inc: { seq: 1 } },
+    { upsert: true, returnDocument: 'after' }
   );
+  return doc.seq;
+}
 
-  -- Fontes / cartões: Nubank, Santander, Carteira, Conta corrente, Dinheiro
-  CREATE TABLE IF NOT EXISTS sources (
-    id INTEGER PRIMARY KEY,
-    name TEXT NOT NULL,
-    type TEXT NOT NULL,           -- 'credit_card' | 'checking' | 'wallet' | 'cash'
-    closing_day INTEGER,
-    due_day INTEGER,
-    created_at TEXT DEFAULT (datetime('now'))
-  );
+// Converte um documento do Mongo para o formato da API (contrato v1/SQLite): _id -> id.
+// Coleções com _id não-numérico (settings, classification_history) não expõem `id`.
+export function serialize(doc) {
+  if (!doc) return doc;
+  const { _id, ...rest } = doc;
+  if (typeof _id === 'number') return { id: _id, ...rest };
+  return { ...rest, _id };
+}
 
-  CREATE TABLE IF NOT EXISTS categories (
-    id INTEGER PRIMARY KEY,
-    name TEXT NOT NULL UNIQUE,
-    budget_limit REAL
-  );
+export const serializeAll = (docs) => docs.map(serialize);
 
-  -- Lançamentos. amount é SEMPRE magnitude positiva; direção vem do type.
-  CREATE TABLE IF NOT EXISTS transactions (
-    id INTEGER PRIMARY KEY,
-    fitid TEXT UNIQUE,
-    person_id INTEGER REFERENCES people(id) ON DELETE CASCADE,
-    source_id INTEGER REFERENCES sources(id) ON DELETE SET NULL,
-    category_id INTEGER REFERENCES categories(id) ON DELETE SET NULL,
-    counterparty_person_id INTEGER REFERENCES people(id) ON DELETE SET NULL, -- destino do transfer
-    type TEXT NOT NULL,           -- 'expense' | 'income' | 'payment' | 'transfer'
-    reference_month TEXT NOT NULL,
-    date TEXT NOT NULL,
-    description TEXT NOT NULL,     -- rótulo exibido (pode ser limpo pela IA)
-    memo_original TEXT,           -- texto cru do extrato (dedup/aprendizado)
-    amount REAL NOT NULL,         -- magnitude positiva
-    installment TEXT,
-    source TEXT,                  -- 'manual' | 'ofx' | 'pdf' | 'recurring'
-    ai_suggested INTEGER DEFAULT 0,
-    confirmed INTEGER DEFAULT 0,
-    recurring_id INTEGER,
-    created_at TEXT DEFAULT (datetime('now'))
-  );
-
-  CREATE INDEX IF NOT EXISTS idx_tx_month ON transactions(reference_month);
-  CREATE INDEX IF NOT EXISTS idx_tx_person ON transactions(person_id);
-  CREATE INDEX IF NOT EXISTS idx_tx_source ON transactions(source_id);
-
-  -- Recorrência: receita/gasto fixo; total_occurrences NULL = infinito, N = parcelado (1/N)
-  CREATE TABLE IF NOT EXISTS recurring_rules (
-    id INTEGER PRIMARY KEY,
-    type TEXT NOT NULL DEFAULT 'income',  -- 'income' | 'expense'
-    person_id INTEGER REFERENCES people(id) ON DELETE CASCADE,
-    source_id INTEGER REFERENCES sources(id) ON DELETE SET NULL,
-    category_id INTEGER REFERENCES categories(id) ON DELETE SET NULL,
-    description TEXT NOT NULL,
-    amount REAL NOT NULL,
-    day_of_month INTEGER NOT NULL DEFAULT 1,
-    start_month TEXT NOT NULL,
-    end_month TEXT,
-    total_occurrences INTEGER,            -- NULL = infinita
-    active INTEGER DEFAULT 1,
-    created_at TEXT DEFAULT (datetime('now'))
-  );
-
-  -- Aprendizado: memo -> categoria + pessoa
-  CREATE TABLE IF NOT EXISTS classification_history (
-    id INTEGER PRIMARY KEY,
-    memo_normalized TEXT NOT NULL UNIQUE,
-    categoria TEXT NOT NULL,
-    person_name TEXT,
-    uses INTEGER DEFAULT 1,
-    last_used_at TEXT
-  );
-
-  CREATE TABLE IF NOT EXISTS settings (
-    key TEXT PRIMARY KEY,
-    value TEXT
-  );
-`);
-
-// ---- Seeds ----
 const DEFAULT_CATEGORIES = [
   'Alimentação', 'Transporte', 'Moradia', 'Saúde',
   'Lazer', 'Assinaturas', 'Compras online', 'Outros'
 ];
-if (db.prepare('SELECT COUNT(*) AS n FROM categories').get().n === 0) {
-  const insert = db.prepare('INSERT INTO categories (name) VALUES (?)');
-  db.transaction((names) => names.forEach((n) => insert.run(n)))(DEFAULT_CATEGORIES);
+
+// Cria índices e semeia dados iniciais. Idempotente.
+export async function initSchema() {
+  // Índices de transactions (espelham idx_tx_* do SQLite)
+  await col.transactions().createIndexes([
+    { key: { reference_month: 1 }, name: 'idx_tx_month' },
+    { key: { person_id: 1 }, name: 'idx_tx_person' },
+    { key: { source_id: 1 }, name: 'idx_tx_source' }
+  ]);
+  // fitid UNIQUE — índice PARCIAL: no Mongo múltiplos nulls quebrariam um único normal.
+  await col.transactions().createIndex(
+    { fitid: 1 },
+    { unique: true, partialFilterExpression: { fitid: { $type: 'string' } }, name: 'uniq_tx_fitid' }
+  );
+  // Idempotência da materialização de recorrências: 1 lançamento por (regra, mês).
+  // Também serve às consultas por recurring_id (prefixo do índice composto).
+  await col.transactions().createIndex(
+    { recurring_id: 1, reference_month: 1 },
+    { unique: true, partialFilterExpression: { recurring_id: { $type: 'number' } }, name: 'uniq_tx_recurring_month' }
+  );
+  await col.categories().createIndex({ name: 1 }, { unique: true, name: 'uniq_cat_name' });
+
+  // ---- Seeds ----
+  if (await col.categories().countDocuments() === 0) {
+    for (const name of DEFAULT_CATEGORIES) {
+      await col.categories().insertOne({ _id: await nextId('categories'), name, budget_limit: null });
+    }
+  }
+  if (await col.people().countDocuments() === 0) {
+    await col.people().insertOne({
+      _id: await nextId('people'),
+      name: 'Própria',
+      is_self: 1,
+      initial_balance: 0,
+      color: '#4DA6FF',
+      created_at: new Date().toISOString()
+    });
+  }
 }
 
-// Pessoa "Própria" semeada por padrão
-if (db.prepare('SELECT COUNT(*) AS n FROM people').get().n === 0) {
-  db.prepare('INSERT INTO people (name, is_self, color) VALUES (?, 1, ?)').run('Própria', '#4DA6FF');
-}
-
-export default db;
+export default client;

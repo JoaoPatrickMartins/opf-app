@@ -1,25 +1,37 @@
-import db from '../db.js';
+import { col } from '../db.js';
 import { normalizeMemo } from '../ai/learning.js';
+
+// Constrói um mapa id -> name a partir de uma coleção.
+async function nameMap(collection) {
+  const docs = await collection.find({}, { projection: { _id: 1, name: 1 } }).toArray();
+  const m = new Map();
+  for (const d of docs) m.set(d._id, d.name);
+  return m;
+}
 
 // Detecção 100% heurística (S14): mesma origem aparecendo em >=3 meses distintos com valor parecido.
 // A IA, quando ligada, só redige o aviso — não entra na detecção.
-export function detectSubscriptions() {
-  const rows = db.prepare(`
-    SELECT t.description, t.memo_original, t.amount, t.reference_month,
-      c.name AS category_name, p.name AS person_name, s.name AS source_name
-    FROM transactions t
-    LEFT JOIN categories c ON c.id=t.category_id
-    LEFT JOIN people p ON p.id=t.person_id
-    LEFT JOIN sources s ON s.id=t.source_id
-    WHERE t.type='expense'
-  `).all();
+export async function detectSubscriptions() {
+  const [txs, catNames, personNames, sourceNames] = await Promise.all([
+    col.transactions().find({ type: 'expense' }).toArray(),
+    nameMap(col.categories()),
+    nameMap(col.people()),
+    nameMap(col.sources())
+  ]);
 
   const groups = new Map();
-  for (const r of rows) {
-    const key = normalizeMemo(r.memo_original || r.description);
+  for (const t of txs) {
+    const key = normalizeMemo(t.memo_original || t.description);
     if (!key) continue;
     if (!groups.has(key)) groups.set(key, []);
-    groups.get(key).push(r);
+    groups.get(key).push({
+      description: t.description,
+      amount: t.amount,
+      reference_month: t.reference_month,
+      category_name: t.category_id != null ? (catNames.get(t.category_id) || null) : null,
+      person_name: t.person_id != null ? (personNames.get(t.person_id) || null) : null,
+      source_name: t.source_id != null ? (sourceNames.get(t.source_id) || null) : null
+    });
   }
 
   const subs = [];

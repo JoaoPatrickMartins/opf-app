@@ -1,8 +1,35 @@
-import db from '../db.js';
+import { col } from '../db.js';
+
+// Escapa metacaracteres de regex para usar um termo livre como "contém" (equivale ao LIKE %x%).
+const escapeRegex = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const like = (v) => ({ $regex: escapeRegex(v), $options: 'i' });
+
+// id -> name para enriquecer resultados (substitui os LEFT JOIN).
+async function nameMaps() {
+  const [people, categories, sources] = await Promise.all([
+    col.people().find({}, { projection: { _id: 1, name: 1 } }).toArray(),
+    col.categories().find({}, { projection: { _id: 1, name: 1 } }).toArray(),
+    col.sources().find({}, { projection: { _id: 1, name: 1 } }).toArray()
+  ]);
+  const toMap = (arr) => new Map(arr.map((d) => [d._id, d.name]));
+  return { people: toMap(people), categories: toMap(categories), sources: toMap(sources) };
+}
+
+function enrich(t, maps) {
+  return {
+    date: t.date,
+    description: t.description,
+    amount: t.amount,
+    type: t.type,
+    person: t.person_id != null ? (maps.people.get(t.person_id) || null) : null,
+    category: t.category_id != null ? (maps.categories.get(t.category_id) || null) : null,
+    source: t.source_id != null ? (maps.sources.get(t.source_id) || null) : null
+  };
+}
 
 // Executa uma consulta ESTRUTURADA e segura (S15). A IA só produz o spec; os números saem daqui.
 // spec: { operation: 'sum'|'count'|'avg'|'list'|'compare', type, person, category, source, month, months }
-export function runStructuredQuery(rawSpec) {
+export async function runStructuredQuery(rawSpec) {
   // a IA às vezes devolve a string "null" — normaliza para vazio
   const clean = (v) => (v && v !== 'null' && v !== 'undefined' ? v : null);
   const spec = {
@@ -14,61 +41,56 @@ export function runStructuredQuery(rawSpec) {
     month: clean(rawSpec.month),
     months: rawSpec.months
   };
-  const where = [];
-  const params = {};
+  const filter = {};
   const resolved = {};
 
   const TYPES = ['expense', 'income', 'payment', 'transfer'];
-  if (spec.type && TYPES.includes(spec.type)) { where.push('t.type=@type'); params.type = spec.type; resolved.type = spec.type; }
+  if (spec.type && TYPES.includes(spec.type)) { filter.type = spec.type; resolved.type = spec.type; }
 
   if (spec.person) {
-    const p = db.prepare('SELECT id,name FROM people WHERE name LIKE ?').get(`%${spec.person}%`);
-    if (p) { where.push('t.person_id=@person_id'); params.person_id = p.id; resolved.person = p.name; }
+    const p = await col.people().findOne({ name: like(spec.person) }, { projection: { _id: 1, name: 1 } });
+    if (p) { filter.person_id = p._id; resolved.person = p.name; }
   }
   if (spec.category) {
-    const c = db.prepare('SELECT id,name FROM categories WHERE name LIKE ?').get(`%${spec.category}%`);
-    if (c) { where.push('t.category_id=@category_id'); params.category_id = c.id; resolved.category = c.name; }
+    const c = await col.categories().findOne({ name: like(spec.category) }, { projection: { _id: 1, name: 1 } });
+    if (c) { filter.category_id = c._id; resolved.category = c.name; }
   }
   if (spec.source) {
-    const s = db.prepare('SELECT id,name FROM sources WHERE name LIKE ?').get(`%${spec.source}%`);
-    if (s) { where.push('t.source_id=@source_id'); params.source_id = s.id; resolved.source = s.name; }
+    const s = await col.sources().findOne({ name: like(spec.source) }, { projection: { _id: 1, name: 1 } });
+    if (s) { filter.source_id = s._id; resolved.source = s.name; }
   }
-  if (spec.month && /^\d{4}-\d{2}$/.test(spec.month)) { where.push('t.reference_month=@month'); params.month = spec.month; resolved.month = spec.month; }
+  if (spec.month && /^\d{4}-\d{2}$/.test(spec.month)) { filter.reference_month = spec.month; resolved.month = spec.month; }
 
-  const W = where.length ? 'WHERE ' + where.join(' AND ') : '';
   const op = ['sum', 'count', 'avg', 'list', 'compare'].includes(spec.operation) ? spec.operation : 'sum';
 
   if (op === 'compare') {
     const n = Math.min(Math.max(Number(spec.months) || 6, 1), 24);
-    const rows = db.prepare(`
-      SELECT reference_month AS month, COALESCE(SUM(amount),0) AS total
-      FROM transactions t ${W} GROUP BY reference_month ORDER BY reference_month DESC LIMIT ${n}
-    `).all(params).reverse();
+    const rows = (await col.transactions().aggregate([
+      { $match: filter },
+      { $group: { _id: '$reference_month', total: { $sum: '$amount' } } },
+      { $sort: { _id: -1 } },
+      { $limit: n }
+    ]).toArray()).map((r) => ({ month: r._id, total: r.total })).reverse();
     return { operation: op, resolved, rows };
   }
+
+  const maps = await nameMaps();
 
   if (op === 'list') {
-    const rows = db.prepare(`
-      SELECT t.date, t.description, t.amount, t.type,
-        p.name AS person, c.name AS category, s.name AS source
-      FROM transactions t
-      LEFT JOIN people p ON p.id=t.person_id
-      LEFT JOIN categories c ON c.id=t.category_id
-      LEFT JOIN sources s ON s.id=t.source_id
-      ${W} ORDER BY t.date DESC LIMIT 50
-    `).all(params);
-    return { operation: op, resolved, rows };
+    const docs = await col.transactions().find(filter).sort({ date: -1 }).limit(50).toArray();
+    return { operation: op, resolved, rows: docs.map((t) => enrich(t, maps)) };
   }
 
-  const agg = op === 'count' ? 'COUNT(*)' : op === 'avg' ? 'AVG(amount)' : 'SUM(amount)';
-  const value = db.prepare(`SELECT COALESCE(${agg},0) AS v FROM transactions t ${W}`).get(params).v;
-  const sample = db.prepare(`
-    SELECT t.date, t.description, t.amount, p.name AS person, c.name AS category, s.name AS source
-    FROM transactions t
-    LEFT JOIN people p ON p.id=t.person_id
-    LEFT JOIN categories c ON c.id=t.category_id
-    LEFT JOIN sources s ON s.id=t.source_id
-    ${W} ORDER BY t.date DESC LIMIT 20
-  `).all(params);
-  return { operation: op, resolved, value: Math.round(value * 100) / 100, rows: sample };
+  let value = 0;
+  if (op === 'count') {
+    value = await col.transactions().countDocuments(filter);
+  } else {
+    const agg = await col.transactions().aggregate([
+      { $match: filter },
+      { $group: { _id: null, v: op === 'avg' ? { $avg: '$amount' } : { $sum: '$amount' } } }
+    ]).toArray();
+    value = agg[0]?.v || 0;
+  }
+  const docs = await col.transactions().find(filter).sort({ date: -1 }).limit(20).toArray();
+  return { operation: op, resolved, value: Math.round(value * 100) / 100, rows: docs.map((t) => enrich(t, maps)) };
 }

@@ -41,7 +41,7 @@ function extractJson(content) {
 
 // items: { key, memo, amount }. Retorna [{ key, categoria, pessoa }].
 export async function classifyBatch({ categories, people, examples, items }) {
-  const apiKey = getGroqKey();
+  const apiKey = await getGroqKey();
   if (!apiKey || !items.length) return [];
   const prompt = buildPrompt({ categories, people, examples, items });
 

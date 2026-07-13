@@ -1,4 +1,4 @@
-import db from '../db.js';
+import { col, nextId } from '../db.js';
 import { daysInMonth } from './invoice.js';
 
 function monthsBetween(start, month) {
@@ -9,39 +9,44 @@ function monthsBetween(start, month) {
 
 // Materializa as recorrências ativas para o mês (idempotente: recurring_id + reference_month).
 // total_occurrences != NULL → parcelado: materializa só até a N-ésima ocorrência e marca installment x/N.
-export function materializeRecurring(month) {
+export async function materializeRecurring(month) {
   if (!month) return;
-  const rules = db.prepare(`
-    SELECT * FROM recurring_rules
-    WHERE active = 1 AND start_month <= ? AND (end_month IS NULL OR end_month >= ?)
-  `).all(month, month);
+  const rules = await col.recurring().find({
+    active: 1,
+    start_month: { $lte: month },
+    $or: [{ end_month: null }, { end_month: { $gte: month } }]
+  }).toArray();
 
-  const exists = db.prepare('SELECT 1 FROM transactions WHERE recurring_id = ? AND reference_month = ?');
-  const insert = db.prepare(`
-    INSERT INTO transactions
-      (recurring_id, person_id, source_id, category_id, type, reference_month, date, description, memo_original, amount, installment, source, confirmed)
-    VALUES (@recurring_id, @person_id, @source_id, @category_id, @type, @reference_month, @date, @description, @description, @amount, @installment, 'recurring', 1)
-  `);
-
-  db.transaction(() => {
-    for (const r of rules) {
-      const idx = monthsBetween(r.start_month, month) + 1; // 1-based
-      if (idx < 1) continue;
-      if (r.total_occurrences && idx > r.total_occurrences) continue; // já completou as parcelas
-      if (exists.get(r.id, month)) continue;
-      const day = Math.min(r.day_of_month || 1, daysInMonth(month));
-      insert.run({
-        recurring_id: r.id,
+  for (const r of rules) {
+    const idx = monthsBetween(r.start_month, month) + 1; // 1-based
+    if (idx < 1) continue;
+    if (r.total_occurrences && idx > r.total_occurrences) continue; // já completou as parcelas
+    const already = await col.transactions().findOne({ recurring_id: r._id, reference_month: month });
+    if (already) continue;
+    const day = Math.min(r.day_of_month || 1, daysInMonth(month));
+    try {
+      await col.transactions().insertOne({
+        _id: await nextId('transactions'),
+        fitid: null,
+        recurring_id: r._id,
         person_id: r.person_id || null,
         source_id: r.source_id || null,
         category_id: r.category_id || null,
+        counterparty_person_id: null,
         type: r.type,
         reference_month: month,
         date: `${month}-${String(day).padStart(2, '0')}`,
         description: r.description,
+        memo_original: r.description,
         amount: Math.abs(r.amount),
-        installment: r.total_occurrences ? `${idx}/${r.total_occurrences}` : null
+        installment: r.total_occurrences ? `${idx}/${r.total_occurrences}` : null,
+        source: 'recurring',
+        ai_suggested: 0,
+        confirmed: 1,
+        created_at: new Date().toISOString()
       });
+    } catch (e) {
+      if (e.code !== 11000) throw e; // corrida: já materializado por outra requisição — ok
     }
-  })();
+  }
 }
