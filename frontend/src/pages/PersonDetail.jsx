@@ -26,9 +26,12 @@ export default function PersonDetail() {
   const [loading, setLoading] = useState(true);
   const [tab, setTab] = useState('extrato');
   const [form, setForm] = useState(null); // { tx } | { initialType } | null
+  const [menu, setMenu] = useState(null); // { tx, x, y } — menu de ações (⋮)
+  const [selected, setSelected] = useState(() => new Set()); // ids selecionados p/ pagar em lote
 
   const load = useCallback(() => {
     setLoading(true);
+    setSelected(new Set());
     api.get(`/people/${id}/statement?month=${month}`).then(setData).finally(() => setLoading(false));
   }, [id, month]);
 
@@ -46,6 +49,16 @@ export default function PersonDetail() {
   }
   function payInvoice(inv) {
     setForm({ initialType: 'payment', payFor: { source_id: inv.source_id, month, amount: inv.outstanding } });
+  }
+  // Multi-seleção: só despesas em dinheiro pendentes podem ser pagas em lote.
+  const selectable = (t) => t.type === 'expense' && t.source_type !== 'credit_card' && !t.is_paid;
+  function toggleSel(id) {
+    setSelected((s) => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n; });
+  }
+  async function paySelected() {
+    const ids = [...selected];
+    await Promise.all(ids.map((id) => api.post(`/transactions/${id}/pay`, { paid: true })));
+    setSelected(new Set()); load(); refreshPeople();
   }
 
   if (loading || !data) return <Empty>Carregando…</Empty>;
@@ -92,6 +105,15 @@ export default function PersonDetail() {
               </button>
             ))}
           </div>
+          {selected.size > 0 && (
+            <div className="flex items-center justify-between px-5 py-2.5 bg-azure/8 border-b border-line text-sm">
+              <span className="text-muted">{selected.size} selecionada{selected.size > 1 ? 's' : ''}</span>
+              <div className="flex gap-2 items-center">
+                <button onClick={() => setSelected(new Set())} className="text-muted hover:text-paper text-xs px-2">Limpar</button>
+                <Button className="!py-1 !px-3 text-xs" onClick={paySelected}>Pagar {selected.size}</Button>
+              </div>
+            </div>
+          )}
           {rows.length === 0 ? (
             <Empty>Nada neste mês.</Empty>
           ) : (
@@ -100,7 +122,13 @@ export default function PersonDetail() {
                 const incoming = t.flow === 'transfer_in';
                 const positive = t.type === 'income' || incoming;
                 return (
-                  <div key={`${t.id}-${t.flow || ''}`} className="flex items-center gap-3 px-5 py-2.5 group">
+                  <div key={`${t.id}-${t.flow || ''}`} className={`flex items-center gap-3 px-5 py-2.5 group ${selected.has(t.id) ? 'bg-azure/5' : ''}`}>
+                    <div className="w-4 flex-none flex items-center justify-center">
+                      {selectable(t) && (
+                        <input type="checkbox" checked={selected.has(t.id)} onChange={() => toggleSel(t.id)}
+                          className="w-4 h-4 accent-azure cursor-pointer" aria-label="Selecionar despesa" />
+                      )}
+                    </div>
                     <div className="w-9 h-9 rounded-[9px] flex items-center justify-center bg-indigo/15 text-azure flex-none">
                       <Icon name={t.type === 'expense' ? categoryIcon(t.category_name) : t.type === 'income' ? 'trend' : t.type === 'payment' ? 'card' : 'swap'} size={16} />
                     </div>
@@ -120,16 +148,12 @@ export default function PersonDetail() {
                     </div>
                     <Money value={positive ? t.amount : -t.amount} className={`text-sm font-semibold ${positive ? 'text-positive' : ''}`} />
                     {!incoming && (
-                      <div className="flex gap-1 items-center opacity-0 group-hover:opacity-100 transition-opacity">
-                        {t.type === 'expense' && t.source_type !== 'credit_card' && (
-                          <button onClick={() => markPaid(t.id, !t.is_paid)} title={t.is_paid ? 'Marcar como pendente' : 'Marcar como paga'}
-                            className={`text-[11px] px-1.5 whitespace-nowrap ${t.is_paid ? 'text-faint hover:text-paper' : 'text-positive hover:underline'}`}>
-                            {t.is_paid ? 'paga' : 'marcar paga'}
-                          </button>
-                        )}
-                        <button onClick={() => setForm({ tx: t })} className="w-7 h-7 rounded-full flex items-center justify-center text-muted hover:text-paper hover:bg-white/5"><Icon name="edit" size={14} /></button>
-                        <button onClick={() => remove(t.id)} className="w-7 h-7 rounded-full flex items-center justify-center text-muted hover:text-[#FF7B7B] hover:bg-white/5"><Icon name="trash" size={14} /></button>
-                      </div>
+                      <button
+                        onClick={(e) => { const r = e.currentTarget.getBoundingClientRect(); setMenu({ tx: t, x: r.right, y: r.bottom }); }}
+                        aria-label="Ações"
+                        className={`w-7 h-7 rounded-full flex items-center justify-center text-muted hover:text-paper hover:bg-white/5 transition-opacity ${menu?.tx.id === t.id ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}`}>
+                        <Icon name="dots" size={16} />
+                      </button>
                     )}
                   </div>
                 );
@@ -181,6 +205,29 @@ export default function PersonDetail() {
           </Card>
         </div>
       </div>
+
+      {menu && (
+        <>
+          <div className="fixed inset-0 z-40" onClick={() => setMenu(null)} />
+          <div className="fixed z-50 w-44 bg-deep border border-line rounded-m shadow-xl py-1 text-sm overflow-hidden"
+               style={{ top: menu.y + 6, left: Math.max(8, menu.x - 176) }}>
+            <button onClick={() => { setForm({ tx: menu.tx }); setMenu(null); }}
+              className="w-full text-left px-3.5 py-2 hover:bg-white/5 flex items-center gap-2.5">
+              <Icon name="edit" size={15} className="text-muted" /> Editar
+            </button>
+            {menu.tx.type === 'expense' && menu.tx.source_type !== 'credit_card' && (
+              <button onClick={() => { markPaid(menu.tx.id, !menu.tx.is_paid); setMenu(null); }}
+                className="w-full text-left px-3.5 py-2 hover:bg-white/5 flex items-center gap-2.5 text-positive">
+                <Icon name="check" size={15} /> {menu.tx.is_paid ? 'Marcar pendente' : 'Pagar'}
+              </button>
+            )}
+            <button onClick={() => { const id = menu.tx.id; setMenu(null); remove(id); }}
+              className="w-full text-left px-3.5 py-2 hover:bg-white/5 flex items-center gap-2.5 text-[#FF7B7B]">
+              <Icon name="trash" size={15} /> Excluir
+            </button>
+          </div>
+        </>
+      )}
 
       {form && (
         <TransactionForm

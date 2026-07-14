@@ -27,6 +27,8 @@ export function IconSprite() {
       <symbol id="ic-user" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="8" r="3.4" /><path d="M5 20 a7 7 0 0 1 14 0" /></symbol>
       <symbol id="ic-swap" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"><polyline points="7,4 4,7 7,10" /><path d="M4 7 H17 a3 3 0 0 1 3 3" /><polyline points="17,20 20,17 17,14" /><path d="M20 17 H7 a3 3 0 0 1 -3 -3" /></symbol>
       <symbol id="ic-card" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="6" width="18" height="12" rx="2.5" /><line x1="3" y1="10" x2="21" y2="10" /><line x1="6.5" y1="14" x2="10" y2="14" /></symbol>
+      <symbol id="ic-dots" viewBox="0 0 24 24" fill="currentColor" stroke="none"><circle cx="12" cy="5" r="1.7" /><circle cx="12" cy="12" r="1.7" /><circle cx="12" cy="19" r="1.7" /></symbol>
+      <symbol id="ic-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><polyline points="5,12.5 10,17.5 19,7" /></symbol>
     </svg>
   );
 }
