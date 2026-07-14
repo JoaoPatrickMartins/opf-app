@@ -1,7 +1,7 @@
 import { useState, useRef } from 'react';
 import { api } from '../lib/api.js';
 import { useStore } from '../lib/store.jsx';
-import { formatDay, formatMonth } from '../lib/format.js';
+import { formatDay, formatMonth, currentMonth, addMonths } from '../lib/format.js';
 import { Button, Label, Money, Chip, Empty } from '../components/ui.jsx';
 import Icon from '../components/Icon.jsx';
 
@@ -10,6 +10,7 @@ export default function Import() {
   const [sourceId, setSourceId] = useState('');
   const [preview, setPreview] = useState(null);
   const [rows, setRows] = useState([]);
+  const [invoiceMonth, setInvoiceMonth] = useState(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
   const [result, setResult] = useState(null);
@@ -29,8 +30,13 @@ export default function Import() {
     try {
       const data = await api.upload('/import/preview', fd);
       setPreview(data);
+      const isCard = data.source?.type === 'credit_card';
+      const im = data.referenceMonth || currentMonth();
+      setInvoiceMonth(im);
       setRows(data.items.map((it) => ({
         ...it,
+        // cartão: fatura é um documento com um único vencimento → todas no mesmo mês
+        reference_month: isCard ? im : it.reference_month,
         // original do extrato é a descrição principal (e o que será salvo);
         // o rótulo da IA fica como sugestão secundária aplicável
         description: it.memo || it.description,
@@ -52,6 +58,11 @@ export default function Import() {
     const name = people.find((p) => p.id === Number(id))?.name || '';
     setRows((rs) => rs.map((r) => (r.exclude ? r : { ...r, person_id: id, person_name: name })));
   }
+  // Cartão: trocar o mês da fatura re-carimba TODAS as linhas (mesmo vencimento).
+  function changeInvoiceMonth(ym) {
+    setInvoiceMonth(ym);
+    setRows((rs) => rs.map((r) => ({ ...r, reference_month: ym })));
+  }
 
   async function confirm() {
     setBusy(true); setError(null);
@@ -59,7 +70,8 @@ export default function Import() {
       const res = await api.post('/import/confirm', {
         source_id: sourceId ? Number(sourceId) : null,
         items: rows.map((r) => ({
-          fitid: r.fitid, type: r.type, amount: r.amount, date: r.date, reference_month: r.reference_month,
+          fitid: r.fitid, type: r.type, amount: r.amount, date: r.date,
+          reference_month: isCard ? invoiceMonth : r.reference_month,
           description: r.description, memo: r.memo, installment: r.installment, source: r.source,
           person_id: r.person_id ? Number(r.person_id) : null, person_name: r.person_name || null,
           category_id: r.category_id ? Number(r.category_id) : null, category_name: r.category_name || null,
@@ -73,6 +85,7 @@ export default function Import() {
   }
 
   const included = rows.filter((r) => !r.exclude).length;
+  const isCard = preview?.source?.type === 'credit_card';
 
   return (
     <div className="flex flex-col gap-6">
@@ -110,7 +123,7 @@ export default function Import() {
               <h2 className="text-xl font-semibold">{preview.bank} · {preview.format.toUpperCase()}</h2>
               <p className="text-sm text-muted font-light">
                 {included} de {rows.length} serão importadas{preview.source ? ` para ${preview.source.name}` : ''}
-                {preview.referenceMonth && ` · fatura de ${formatMonth(preview.referenceMonth)}`}
+                {!isCard && preview.referenceMonth && ` · ${formatMonth(preview.referenceMonth)}`}
               </p>
             </div>
             <div className="flex gap-2 items-center">
@@ -122,6 +135,22 @@ export default function Import() {
               <Button onClick={confirm} disabled={busy || included === 0}>{busy ? 'Salvando…' : `Distribuir (${included})`}</Button>
             </div>
           </div>
+
+          {isCard && invoiceMonth && (
+            <div className="flex items-center gap-3 flex-wrap p-3.5 rounded-m bg-azure/5 border border-azure/20">
+              <div className="flex flex-col">
+                <span className="text-sm font-medium text-paper">Fatura referente a</span>
+                <span className="text-xs text-faint font-light">Todas as despesas entram no mês de vencimento desta fatura — a data de cada compra é preservada.</span>
+              </div>
+              <div className="flex items-center gap-2 bg-deep border border-line rounded-full px-2 py-1 ml-auto">
+                <button type="button" onClick={() => changeInvoiceMonth(addMonths(invoiceMonth, -1))}
+                  className="w-8 h-8 rounded-full flex items-center justify-center text-muted hover:text-paper hover:bg-white/5 transition-colors" aria-label="Mês anterior">‹</button>
+                <span className="text-sm font-medium min-w-[120px] text-center select-none">{formatMonth(invoiceMonth)}</span>
+                <button type="button" onClick={() => changeInvoiceMonth(addMonths(invoiceMonth, 1))}
+                  className="w-8 h-8 rounded-full flex items-center justify-center text-muted hover:text-paper hover:bg-white/5 transition-colors" aria-label="Próximo mês">›</button>
+              </div>
+            </div>
+          )}
 
           {preview.aiError && <div className="p-3 rounded-m bg-caution/10 border border-caution/20 text-caution text-sm">Sugestões da IA indisponíveis ({preview.aiError}). Classifique manualmente.</div>}
           {error && <p className="text-sm text-[#FF7B7B]">{error}</p>}

@@ -1,11 +1,15 @@
 import { Router } from 'express';
 import { col, nextId, serialize } from '../db.js';
 import { recordLearning } from '../ai/learning.js';
-import { invoiceMonth } from '../lib/invoice.js';
+import { invoiceDueMonth } from '../lib/invoice.js';
 import { materializeRecurring } from '../lib/recurring.js';
 import { parseAmount, num } from '../lib/money.js';
 
 const router = Router();
+
+// FKs chegam do frontend como string (value de <select>); os _id no Mongo são números.
+// Normaliza para número (ou null) para que a resolução de tipo/pessoa/categoria funcione.
+const toId = (v) => (v === undefined || v === null || v === '' ? null : Number(v));
 
 // Mapas id -> nome/tipo para substituir os LEFT JOIN das consultas SQL.
 async function refMaps() {
@@ -50,8 +54,8 @@ async function registerLearningFromTx(_id) {
 async function resolveReferenceMonth({ reference_month, type, source_id, date }) {
   if (reference_month) return reference_month;
   if (type === 'expense' && source_id) {
-    const s = await col.sources().findOne({ _id: Number(source_id) }, { projection: { type: 1, closing_day: 1 } });
-    if (s && s.type === 'credit_card' && s.closing_day) return invoiceMonth(date, s.closing_day);
+    const s = await col.sources().findOne({ _id: Number(source_id) }, { projection: { type: 1, closing_day: 1, due_day: 1 } });
+    if (s && s.type === 'credit_card' && s.closing_day) return invoiceDueMonth(date, s.closing_day, s.due_day);
   }
   return date ? date.slice(0, 7) : null;
 }
@@ -184,10 +188,10 @@ router.post('/', async (req, res, next) => {
     await col.transactions().insertOne({
       _id,
       fitid: null,
-      person_id: b.person_id,
-      source_id: b.source_id || null,
-      category_id: (b.type === 'expense' || b.type === 'income') ? (b.category_id || null) : null,
-      counterparty_person_id: b.type === 'transfer' ? (b.counterparty_person_id || null) : null,
+      person_id: toId(b.person_id),
+      source_id: toId(b.source_id),
+      category_id: (b.type === 'expense' || b.type === 'income') ? toId(b.category_id) : null,
+      counterparty_person_id: b.type === 'transfer' ? toId(b.counterparty_person_id) : null,
       type: b.type,
       reference_month,
       date: b.date,
@@ -214,7 +218,7 @@ router.put('/:id', async (req, res, next) => {
     const b = req.body;
     const type = b.type || tx.type;
     const date = b.date || tx.date;
-    const source_id = b.source_id === undefined ? tx.source_id : (b.source_id || null);
+    const source_id = b.source_id === undefined ? tx.source_id : toId(b.source_id);
     const reference_month = b.reference_month
       || await resolveReferenceMonth({ type, source_id, date })
       || tx.reference_month;
@@ -227,11 +231,11 @@ router.put('/:id', async (req, res, next) => {
 
     await col.transactions().updateOne({ _id }, {
       $set: {
-        person_id: b.person_id || tx.person_id,
+        person_id: b.person_id === undefined ? tx.person_id : toId(b.person_id),
         source_id,
-        category_id: b.category_id === undefined ? tx.category_id : (b.category_id || null),
+        category_id: b.category_id === undefined ? tx.category_id : toId(b.category_id),
         counterparty_person_id: type === 'transfer'
-          ? (b.counterparty_person_id === undefined ? tx.counterparty_person_id : (b.counterparty_person_id || null))
+          ? (b.counterparty_person_id === undefined ? tx.counterparty_person_id : toId(b.counterparty_person_id))
           : null,
         type,
         reference_month,

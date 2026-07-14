@@ -1,5 +1,6 @@
 import { col } from '../db.js';
 import { num } from './money.js';
+import { todayServer } from './time.js';
 
 // Convenção v2: amount é magnitude positiva; a direção vem do type.
 
@@ -21,6 +22,7 @@ async function sourceTypeMap() {
 export async function personCashBalance(personId) {
   const p = await col.people().findOne({ _id: personId }, { projection: { initial_balance: 1 } });
   if (!p) return 0;
+  const today = todayServer();
   const types = await sourceTypeMap();
   const txs = await col.transactions()
     .find({ $or: [{ person_id: personId }, { type: 'transfer', counterparty_person_id: personId }] })
@@ -28,6 +30,10 @@ export async function personCashBalance(personId) {
 
   let income = 0, cashExpense = 0, payments = 0, sent = 0, received = 0;
   for (const t of txs) {
+    // Saldo = dinheiro disponível HOJE. Lançamentos futuros (ex.: receitas recorrentes
+    // ainda não recebidas, despesas/pagamentos agendados) só contam a partir da data
+    // em que de fato ocorrem — antes disso o dinheiro não está disponível.
+    if (t.date && t.date > today) continue;
     if (t.type === 'transfer' && t.counterparty_person_id === personId) received += num(t.amount);
     if (t.person_id !== personId) continue;
     if (t.type === 'income') income += num(t.amount);

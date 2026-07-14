@@ -38,8 +38,12 @@ export default function Settings() {
     if (!confirm('Excluir categoria?')) return;
     await api.del(`/categories/${id}`); refreshCategories();
   }
+  async function cancelRecurring(id) {
+    if (!confirm('Cancelar esta recorrência? Ela para de gerar lançamentos futuros; os já ocorridos permanecem.')) return;
+    await api.post(`/recurring/${id}/cancel`, {}); loadRecurring();
+  }
   async function removeRecurring(id) {
-    if (!confirm('Remover esta recorrência? Lançamentos futuros gerados também saem.')) return;
+    if (!confirm('Excluir esta recorrência? Os lançamentos futuros (ainda não ocorridos) também saem.')) return;
     await api.del(`/recurring/${id}`); loadRecurring();
   }
   async function toggleAi(feature, value) {
@@ -81,19 +85,29 @@ export default function Settings() {
           <p className="text-sm text-faint font-light">Crie dentro de uma conta (Despesa/Receita → "Todo mês" ou "Parcelada").</p>
         ) : (
           <div className="flex flex-col gap-2">
-            {recurring.map((r) => (
-              <div key={r.id} className="flex items-center gap-3 py-1.5">
-                <Chip tone={r.type === 'income' ? 'pos' : 'neu'}>{r.type === 'income' ? 'receita' : 'gasto'}</Chip>
-                <div className="flex-1 min-w-0">
-                  <div className="text-sm truncate">{r.description} <span className="text-faint text-xs">· {r.person_name}</span></div>
-                  <div className="text-[11px] text-faint">
-                    dia {r.day_of_month}{r.total_occurrences ? ` · ${r.total_occurrences}x (parcelada)` : ' · todo mês'}{r.category_name ? ` · ${r.category_name}` : ''}
+            {recurring.map((r) => {
+              const cancelled = r.active === 0;
+              return (
+                <div key={r.id} className={`flex items-center gap-3 py-1.5 ${cancelled ? 'opacity-50' : ''}`}>
+                  <Chip tone={r.type === 'income' ? 'pos' : 'neu'}>{r.type === 'income' ? 'receita' : 'gasto'}</Chip>
+                  <div className="flex-1 min-w-0">
+                    <div className="text-sm truncate flex items-center gap-2">
+                      <span className="truncate">{r.description} <span className="text-faint text-xs">· {r.person_name}</span></span>
+                      {cancelled && <Chip tone="cau">cancelada</Chip>}
+                    </div>
+                    <div className="text-[11px] text-faint">
+                      dia {r.day_of_month}{r.total_occurrences ? ` · ${r.total_occurrences}x (parcelada)` : ' · todo mês'}{r.category_name ? ` · ${r.category_name}` : ''}
+                    </div>
                   </div>
+                  <Money value={r.type === 'income' ? r.amount : -r.amount} className={`text-sm font-semibold ${r.type === 'income' ? 'text-positive' : ''}`} />
+                  {!cancelled && (
+                    <button onClick={() => cancelRecurring(r.id)} title="Cancelar (parar daqui pra frente)"
+                      className="text-xs text-faint hover:text-caution transition-colors">Cancelar</button>
+                  )}
+                  <button onClick={() => removeRecurring(r.id)} title="Excluir recorrência" className="text-faint hover:text-[#FF7B7B]"><Icon name="trash" size={15} /></button>
                 </div>
-                <Money value={r.type === 'income' ? r.amount : -r.amount} className={`text-sm font-semibold ${r.type === 'income' ? 'text-positive' : ''}`} />
-                <button onClick={() => removeRecurring(r.id)} className="text-faint hover:text-[#FF7B7B]"><Icon name="trash" size={15} /></button>
-              </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </Card>

@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { col, nextId, serialize } from '../db.js';
 import { materializeRecurring } from '../lib/recurring.js';
-import { currentMonthServer } from '../lib/time.js';
+import { currentMonthServer, todayServer } from '../lib/time.js';
 import { parseAmount } from '../lib/money.js';
 
 const router = Router();
@@ -99,12 +99,27 @@ router.put('/:id', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// Cancela uma recorrência daqui pra frente: para de gerar lançamentos futuros e
+// remove só as ocorrências ainda NÃO ocorridas (date > hoje). As já ocorridas
+// (ex.: a mensalidade deste mês já paga) permanecem no histórico.
+router.post('/:id/cancel', async (req, res, next) => {
+  try {
+    const _id = Number(req.params.id);
+    const r = await col.recurring().findOne({ _id });
+    if (!r) return res.status(404).json({ error: 'Recorrência não encontrada' });
+    const today = todayServer();
+    const purge = await col.transactions().deleteMany({ recurring_id: _id, date: { $gt: today } });
+    await col.recurring().updateOne({ _id }, { $set: { active: 0, end_month: currentMonthServer() } });
+    res.json(await full(_id).then((doc) => ({ ...doc, purged: purge.deletedCount })));
+  } catch (err) { next(err); }
+});
+
 router.delete('/:id', async (req, res, next) => {
   try {
     const _id = Number(req.params.id);
-    const fromMonth = req.query.from || currentMonthServer();
+    // Purga só o que ainda não ocorreu (date > hoje); lançamentos já ocorridos permanecem.
     if (req.query.purge_future !== 'false') {
-      await col.transactions().deleteMany({ recurring_id: _id, reference_month: { $gte: fromMonth } });
+      await col.transactions().deleteMany({ recurring_id: _id, date: { $gt: todayServer() } });
     }
     await col.recurring().deleteOne({ _id });
     res.json({ ok: true });

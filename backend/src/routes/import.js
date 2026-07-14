@@ -6,7 +6,8 @@ import { parseOfx } from '../parsers/ofx.js';
 import { parseSantanderPdf } from '../parsers/pdf-santander.js';
 import { classifyBatch } from '../ai/classify.js';
 import { lookupLearning, getLearningExamples, recordLearning, normalizeMemo } from '../ai/learning.js';
-import { invoiceMonth } from '../lib/invoice.js';
+import { invoiceDueMonth } from '../lib/invoice.js';
+import { currentMonthServer } from '../lib/time.js';
 import { parseAmount } from '../lib/money.js';
 import { aiEnabled } from './settings.js';
 import { extractTransactionsFromText } from '../ai/extract.js';
@@ -55,12 +56,19 @@ router.post('/preview', upload.single('file'), async (req, res, next) => {
       ? await col.sources().findOne({ _id: Number(req.body.source_id) })
       : null;
 
-    // cartão de crédito com fechamento: recalcula mês de referência (compras após o fechamento → próxima fatura)
-    if (source && source.type === 'credit_card' && source.closing_day) {
-      for (const t of parsed.transactions) {
-        if (format === 'pdf' && t.reference_month) continue;
-        t.reference_month = invoiceMonth(t.date, source.closing_day);
-      }
+    // Cartão de crédito: a fatura importada é UM documento com UM vencimento.
+    // Todos os lançamentos entram no mês de VENCIMENTO da fatura (quando ela é paga),
+    // independentemente da data de cada compra — que é preservada em `date`.
+    // O mês é um default; a UI de importação deixa o usuário informar/ajustar a fatura.
+    let invoiceReferenceMonth = null;
+    if (source && source.type === 'credit_card') {
+      const dates = parsed.transactions.map((t) => t.date).filter(Boolean).sort();
+      const latest = dates[dates.length - 1] || null;
+      invoiceReferenceMonth =
+        parsed.referenceMonth ||
+        (latest ? invoiceDueMonth(latest, source.closing_day, source.due_day) : null) ||
+        currentMonthServer();
+      for (const t of parsed.transactions) t.reference_month = invoiceReferenceMonth;
     }
 
     let items = parsed.transactions.map((t, i) => ({
@@ -139,7 +147,7 @@ router.post('/preview', upload.single('file'), async (req, res, next) => {
     res.json({
       bank: parsed.bank,
       format: parsed.format,
-      referenceMonth: parsed.referenceMonth || null,
+      referenceMonth: invoiceReferenceMonth || parsed.referenceMonth || null,
       source: source ? { id: source._id, name: source.name, type: source.type } : null,
       aiError: aiError || aiExtractError,
       items

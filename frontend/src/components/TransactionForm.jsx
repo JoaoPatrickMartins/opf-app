@@ -18,6 +18,7 @@ export default function TransactionForm({ person, tx, initialType, onClose, onSa
     source_id: tx?.source_id || '',
     category_id: tx?.category_id || '',
     counterparty_person_id: tx?.counterparty_person_id || (others[0]?.id ?? ''),
+    person_id: tx?.person_id ?? person.id,   // dono do lançamento (permite mover para outra conta)
     description: tx?.description || ''
   });
   const [freq, setFreq] = useState('once');       // once | recurring | installment
@@ -69,7 +70,7 @@ export default function TransactionForm({ person, tx, initialType, onClose, onSa
         });
       } else {
         const payload = {
-          person_id: person.id,
+          person_id: form.person_id,
           type: form.type,
           amount: Number(form.amount),
           date: form.date,
@@ -78,6 +79,9 @@ export default function TransactionForm({ person, tx, initialType, onClose, onSa
           category_id: showCategory ? (form.category_id || null) : null,
           counterparty_person_id: form.type === 'transfer' ? (form.counterparty_person_id || null) : null
         };
+        // Ao editar/mover sem alterar a data, preserva o mês de referência já definido
+        // (ex.: mês de vencimento da fatura), em vez de recalcular pela data da compra.
+        if (editing && form.date === tx.date) payload.reference_month = tx.reference_month;
         if (editing) await api.put(`/transactions/${tx.id}`, payload);
         else await api.post('/transactions', payload);
       }
@@ -100,6 +104,20 @@ export default function TransactionForm({ person, tx, initialType, onClose, onSa
             </button>
           ))}
         </div>
+
+        {editing && form.type !== 'transfer' && (
+          <label className="block">
+            <span className="text-xs text-faint">Conta (dono)</span>
+            <select className="field mt-1" value={form.person_id} onChange={(e) => set('person_id', Number(e.target.value))}>
+              {people.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+            </select>
+            {Number(form.person_id) !== person.id && (
+              <span className="text-[11px] text-azure mt-1 block">
+                Será movido para {people.find((p) => p.id === Number(form.person_id))?.name}.
+              </span>
+            )}
+          </label>
+        )}
 
         <div className="grid grid-cols-2 gap-3">
           <label className="block">
