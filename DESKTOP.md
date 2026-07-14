@@ -39,6 +39,24 @@ chmod +x release/OPF-1.0.0.AppImage
 - Se aparecer erro de **FUSE** (`libfuse.so.2`), instale `sudo apt install libfuse2`
   **ou** rode com: `./release/OPF-1.0.0.AppImage --appimage-extract-and-run`
 
+### Atualizar o app (depois de mexer no código)
+
+No ambiente de desenvolvimento (onde há Node), **um comando** gera a nova versão:
+```bash
+npm run desktop:release
+```
+Isso incrementa a versão (1.0.1 → 1.0.2 …) e regenera `release/OPF-<versão>.deb` e `.AppImage`.
+
+Depois, na sua máquina, **instale por cima** do que já está:
+```bash
+sudo apt install ./OPF-<versão>.deb      # ex.: ./OPF-1.0.2.deb
+```
+O `apt` atualiza no lugar — mesmo ícone no menu, só a versão nova. Não precisa desinstalar,
+e nada se perde (seus dados ficam no MongoDB na nuvem, não no app).
+
+> `desktop:build` reconstrói mantendo a versão; `desktop:release` **sobe a versão** — use
+> este para atualizações, pois é o número maior que faz o `apt` reconhecer como update.
+
 ---
 
 ## Windows — .exe (instalador)
