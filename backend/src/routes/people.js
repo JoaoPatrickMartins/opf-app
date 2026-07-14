@@ -3,6 +3,7 @@ import { col, nextId, serialize, serializeAll } from '../db.js';
 import { personCashBalance, settlement } from '../lib/balances.js';
 import { materializeRecurring } from '../lib/recurring.js';
 import { num } from '../lib/money.js';
+import { todayServer } from '../lib/time.js';
 
 const router = Router();
 
@@ -118,7 +119,32 @@ router.get('/:id/statement', async (req, res, next) => {
     const expenses = own.filter((t) => t.type === 'expense');
     const incomes = own.filter((t) => t.type === 'income');
 
-    // despesas separadas por cartão/fonte
+    // Faturas de cartão do mês: gasto no cartão − pagamentos JÁ FEITOS ao cartão (por cartão).
+    // Pagamento futuro (agendado) não abate a fatura nem o caixa até a data chegar.
+    const today = todayServer();
+    const invoiceMap = new Map();
+    for (const t of own) {
+      if (t.source_id == null || t.source_type !== 'credit_card') continue;
+      if (!invoiceMap.has(t.source_id)) {
+        invoiceMap.set(t.source_id, { source_id: t.source_id, source_name: t.source_name, spent: 0, paid: 0 });
+      }
+      const inv = invoiceMap.get(t.source_id);
+      if (t.type === 'expense') inv.spent += num(t.amount);
+      else if (t.type === 'payment' && (!t.date || t.date <= today)) inv.paid += num(t.amount);
+    }
+    const r2 = (n) => Math.round(n * 100) / 100;
+    const cardInvoices = [...invoiceMap.values()]
+      .map((inv) => ({ source_id: inv.source_id, source_name: inv.source_name, spent: r2(inv.spent), paid: r2(inv.paid), outstanding: r2(Math.max(0, inv.spent - inv.paid)) }))
+      .sort((a, b) => b.outstanding - a.outstanding);
+    const cardFullyPaid = new Map(cardInvoices.map((i) => [i.source_id, i.outstanding <= 0.005]));
+
+    // Status de cada despesa: dinheiro usa o flag `paid`; cartão é "pago" se a fatura do mês zerou.
+    for (const t of own) {
+      if (t.type !== 'expense') continue;
+      t.is_paid = t.source_type === 'credit_card' ? !!cardFullyPaid.get(t.source_id) : !!t.paid;
+    }
+
+    // despesas separadas por cartão/fonte (cartões ganham "a pagar" = gasto − pago)
     const bySourceMap = new Map();
     for (const t of expenses) {
       const key = t.source_id || 'cash';
@@ -127,6 +153,13 @@ router.get('/:id/statement', async (req, res, next) => {
       }
       const g = bySourceMap.get(key);
       g.spent += num(t.amount); g.count += 1;
+    }
+    for (const s of bySourceMap.values()) {
+      if (s.source_type === 'credit_card') {
+        const inv = invoiceMap.get(s.source_id);
+        s.paid = inv ? inv.paid : 0;
+        s.outstanding = Math.max(0, s.spent - s.paid);
+      }
     }
     const bySource = [...bySourceMap.values()].sort((a, b) => b.spent - a.spent);
 
@@ -138,10 +171,13 @@ router.get('/:id/statement', async (req, res, next) => {
     }
     const byCategory = [...byCatMap.entries()].map(([category_name, spent]) => ({ category_name, spent })).sort((a, b) => b.spent - a.spent);
 
+    const cashExpenses = expenses.filter((t) => t.source_type !== 'credit_card');
     const totals = {
       gastos: expenses.reduce((s, t) => s + num(t.amount), 0),
       gastos_cartao: expenses.filter((t) => t.source_type === 'credit_card').reduce((s, t) => s + num(t.amount), 0),
-      gastos_dinheiro: expenses.filter((t) => t.source_type !== 'credit_card').reduce((s, t) => s + num(t.amount), 0),
+      gastos_dinheiro: cashExpenses.reduce((s, t) => s + num(t.amount), 0),
+      dinheiro_pendente: r2(cashExpenses.filter((t) => !t.paid).reduce((s, t) => s + num(t.amount), 0)),
+      cartao_a_pagar: r2(cardInvoices.reduce((s, i) => s + i.outstanding, 0)),
       receitas: incomes.reduce((s, t) => s + num(t.amount), 0),
       pagamentos: own.filter((t) => t.type === 'payment').reduce((s, t) => s + num(t.amount), 0),
       transferencias_enviadas: own.filter((t) => t.type === 'transfer').reduce((s, t) => s + num(t.amount), 0),
@@ -156,6 +192,7 @@ router.get('/:id/statement', async (req, res, next) => {
       cash_balance: cashBalance,
       totals,
       bySource,
+      cardInvoices,
       byCategory,
       transactions: [...own, ...received].sort(sortByDateId),
       expenses,

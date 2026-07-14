@@ -4,6 +4,7 @@ import { recordLearning } from '../ai/learning.js';
 import { invoiceDueMonth } from '../lib/invoice.js';
 import { materializeRecurring } from '../lib/recurring.js';
 import { parseAmount, num } from '../lib/money.js';
+import { todayServer } from '../lib/time.js';
 
 const router = Router();
 
@@ -97,15 +98,21 @@ router.get('/summary', async (req, res, next) => {
     const srcName = new Map(sources.map((s) => [s._id, s.name]));
     const srcType = new Map(sources.map((s) => [s._id, s.type]));
 
-    let gastos = 0, gastos_cartao = 0, receitas = 0, pagamentos = 0;
+    const today = todayServer();
+    let gastos = 0, gastos_cartao = 0, receitas = 0, pagamentos = 0, cartao_pago = 0;
     for (const t of monthTx) {
+      const isCard = t.source_id != null && srcType.get(Number(t.source_id)) === 'credit_card';
       if (t.type === 'expense') {
         gastos += num(t.amount);
-        if (t.source_id != null && srcType.get(t.source_id) === 'credit_card') gastos_cartao += num(t.amount);
+        if (isCard) gastos_cartao += num(t.amount);
       } else if (t.type === 'income') receitas += num(t.amount);
-      else if (t.type === 'payment') pagamentos += num(t.amount);
+      else if (t.type === 'payment') {
+        pagamentos += num(t.amount);
+        if (isCard && (!t.date || t.date <= today)) cartao_pago += num(t.amount); // pagamento já feito abate a fatura
+      }
     }
-    const totals = { gastos, gastos_cartao, receitas, pagamentos };
+    const cartao_a_pagar = Math.max(0, Math.round((gastos_cartao - cartao_pago) * 100) / 100);
+    const totals = { gastos, gastos_cartao, cartao_a_pagar, receitas, pagamentos };
 
     const catSpent = new Map();
     for (const t of monthTx) {
@@ -193,6 +200,8 @@ router.post('/', async (req, res, next) => {
       category_id: (b.type === 'expense' || b.type === 'income') ? toId(b.category_id) : null,
       counterparty_person_id: b.type === 'transfer' ? toId(b.counterparty_person_id) : null,
       type: b.type,
+      // Despesa nasce PENDENTE (só abate o caixa quando marcada como paga). Demais tipos: n/a.
+      paid: b.type === 'expense' ? !!b.paid : null,
       reference_month,
       date: b.date,
       description: b.description || '',
@@ -242,10 +251,24 @@ router.put('/:id', async (req, res, next) => {
         date,
         description: b.description ?? tx.description,
         amount,
+        paid: b.paid === undefined ? tx.paid : (type === 'expense' ? !!b.paid : null),
         installment: b.installment === undefined ? tx.installment : (b.installment || null)
       }
     });
     await registerLearningFromTx(_id);
+    res.json(await getFull(_id));
+  } catch (err) { next(err); }
+});
+
+// Marca uma despesa em dinheiro como paga/pendente (abate ou devolve ao caixa).
+router.post('/:id/pay', async (req, res, next) => {
+  try {
+    const _id = Number(req.params.id);
+    const tx = await col.transactions().findOne({ _id });
+    if (!tx) return res.status(404).json({ error: 'Lançamento não encontrado' });
+    if (tx.type !== 'expense') return res.status(400).json({ error: 'Só despesas têm status de pagamento' });
+    const paid = req.body?.paid === undefined ? true : !!req.body.paid;
+    await col.transactions().updateOne({ _id }, { $set: { paid } });
     res.json(await getFull(_id));
   } catch (err) { next(err); }
 });

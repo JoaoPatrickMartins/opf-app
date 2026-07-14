@@ -30,17 +30,19 @@ export async function personCashBalance(personId) {
 
   let income = 0, cashExpense = 0, payments = 0, sent = 0, received = 0;
   for (const t of txs) {
-    // Saldo = dinheiro disponível HOJE. Lançamentos futuros (ex.: receitas recorrentes
-    // ainda não recebidas, despesas/pagamentos agendados) só contam a partir da data
-    // em que de fato ocorrem — antes disso o dinheiro não está disponível.
+    // Despesa em dinheiro/débito: só SAI do caixa quando marcada como PAGA (t.paid).
+    // Despesa de cartão NUNCA entra no caixa (só o pagamento da fatura, abaixo).
+    if (t.person_id === personId && t.type === 'expense') {
+      const st = t.source_id != null ? types.get(Number(t.source_id)) : null;
+      if (st !== 'credit_card' && t.paid) cashExpense += num(t.amount);
+      continue;
+    }
+    // Receita/pagamento/transferência: contam quando a data já ocorreu (não conta o futuro).
     if (t.date && t.date > today) continue;
     if (t.type === 'transfer' && t.counterparty_person_id === personId) received += num(t.amount);
     if (t.person_id !== personId) continue;
     if (t.type === 'income') income += num(t.amount);
-    else if (t.type === 'expense') {
-      const st = t.source_id != null ? types.get(t.source_id) : null;
-      if (st !== 'credit_card') cashExpense += num(t.amount); // NULL ou não-cartão entram no caixa
-    } else if (t.type === 'payment') payments += num(t.amount);
+    else if (t.type === 'payment') payments += num(t.amount);       // pagamento de fatura sai do caixa
     else if (t.type === 'transfer') sent += num(t.amount);
   }
   return num(p.initial_balance) + income - cashExpense - payments - sent + received;

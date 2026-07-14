@@ -86,7 +86,7 @@ export default function Dashboard() {
         </div>
         <div className="flex gap-7 mt-4 text-sm flex-wrap">
           <div><span className="text-faint">Receitas </span><span className="amount text-positive">R$ {totals.receitas.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</span></div>
-          <div><span className="text-faint">No cartão </span><span className="amount text-sky">R$ {totals.gastos_cartao.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</span></div>
+          <div><span className="text-faint">No cartão (a pagar) </span><span className="amount text-sky">R$ {(totals.cartao_a_pagar ?? totals.gastos_cartao).toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</span></div>
           {totals.pagamentos > 0 && <div><span className="text-faint">Pagamentos </span><span className="amount">R$ {totals.pagamentos.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</span></div>}
         </div>
       </div>

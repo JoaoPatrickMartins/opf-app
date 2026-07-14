@@ -1,11 +1,13 @@
 import { useState } from 'react';
 import { useStore } from '../lib/store.jsx';
 import { api } from '../lib/api.js';
+import { formatMonth, addMonths } from '../lib/format.js';
 import { Button, NumberStepper } from './ui.jsx';
 import Modal from './Modal.jsx';
 
 // person = pessoa dona (contexto da página). tx = edição. initialType opcional.
-export default function TransactionForm({ person, tx, initialType, onClose, onSaved }) {
+// payFor = { source_id, month, amount } quando aberto para pagar uma fatura específica.
+export default function TransactionForm({ person, tx, initialType, payFor, onClose, onSaved }) {
   const { people, sources, categories, month } = useStore();
   const editing = !!tx;
   const creditCards = sources.filter((s) => s.type === 'credit_card');
@@ -13,14 +15,18 @@ export default function TransactionForm({ person, tx, initialType, onClose, onSa
 
   const [form, setForm] = useState({
     type: tx?.type || initialType || 'expense',
-    amount: tx ? tx.amount : '',
+    amount: tx ? tx.amount : (payFor?.amount != null ? payFor.amount : ''),
     date: tx?.date || `${month}-01`,
-    source_id: tx?.source_id || '',
+    source_id: tx?.source_id || payFor?.source_id || '',
     category_id: tx?.category_id || '',
     counterparty_person_id: tx?.counterparty_person_id || (others[0]?.id ?? ''),
     person_id: tx?.person_id ?? person.id,   // dono do lançamento (permite mover para outra conta)
     description: tx?.description || ''
   });
+  // Mês da fatura que o pagamento abate (só para type=payment).
+  const [invoiceMonth, setInvoiceMonth] = useState(payFor?.month || month);
+  // Despesa em dinheiro pode já nascer paga (marcada aqui) — senão fica pendente.
+  const [paidNow, setPaidNow] = useState(false);
   const [freq, setFreq] = useState('once');       // once | recurring | installment
   const [occurrences, setOccurrences] = useState(6);
   const [dayOfMonth, setDayOfMonth] = useState(tx?.date ? Number(tx.date.slice(8, 10)) : 5);
@@ -51,6 +57,8 @@ export default function TransactionForm({ person, tx, initialType, onClose, onSa
   const showCategory = form.type === 'expense' || form.type === 'income';
   const showSource = form.type === 'expense' || form.type === 'income';
   const canRepeat = !editing && (form.type === 'expense' || form.type === 'income');
+  const selectedIsCard = creditCards.some((c) => String(c.id) === String(form.source_id));
+  const isCashExpense = form.type === 'expense' && !selectedIsCard;
 
   async function submit(e) {
     e.preventDefault();
@@ -79,9 +87,12 @@ export default function TransactionForm({ person, tx, initialType, onClose, onSa
           category_id: showCategory ? (form.category_id || null) : null,
           counterparty_person_id: form.type === 'transfer' ? (form.counterparty_person_id || null) : null
         };
-        // Ao editar/mover sem alterar a data, preserva o mês de referência já definido
-        // (ex.: mês de vencimento da fatura), em vez de recalcular pela data da compra.
-        if (editing && form.date === tx.date) payload.reference_month = tx.reference_month;
+        // Pagamento de fatura abate o mês escolhido (reference_month = mês da fatura).
+        if (form.type === 'payment') payload.reference_month = invoiceMonth;
+        // Ao editar/mover sem alterar a data, preserva o mês de referência já definido.
+        else if (editing && form.date === tx.date) payload.reference_month = tx.reference_month;
+        // Despesa nova em dinheiro: nasce paga só se marcado (senão fica pendente).
+        if (form.type === 'expense' && !editing) payload.paid = paidNow;
         if (editing) await api.put(`/transactions/${tx.id}`, payload);
         else await api.post('/transactions', payload);
       }
@@ -147,13 +158,23 @@ export default function TransactionForm({ person, tx, initialType, onClose, onSa
         )}
 
         {form.type === 'payment' && (
-          <label className="block">
-            <span className="text-xs text-faint">Cartão a pagar</span>
-            <select className="field mt-1" value={form.source_id} onChange={(e) => set('source_id', e.target.value)} required>
-              <option value="">Selecione…</option>
-              {creditCards.map((s) => <option key={s.id} value={s.id}>{s.name}{s.invoice ? ` · fatura R$ ${s.invoice.debt.toFixed(2)}` : ''}</option>)}
-            </select>
-          </label>
+          <div className="flex flex-col gap-3">
+            <label className="block">
+              <span className="text-xs text-faint">Cartão a pagar</span>
+              <select className="field mt-1" value={form.source_id} onChange={(e) => set('source_id', e.target.value)} required>
+                <option value="">Selecione…</option>
+                {creditCards.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+              </select>
+            </label>
+            <label className="block">
+              <span className="text-xs text-faint">Fatura de qual mês</span>
+              <div className="flex items-center gap-2 mt-1 bg-deep border border-line rounded-full px-2 py-1 w-fit">
+                <button type="button" onClick={() => setInvoiceMonth(addMonths(invoiceMonth, -1))} className="w-8 h-8 rounded-full flex items-center justify-center text-muted hover:text-paper hover:bg-white/5">‹</button>
+                <span className="text-sm font-medium min-w-[120px] text-center select-none">{formatMonth(invoiceMonth)}</span>
+                <button type="button" onClick={() => setInvoiceMonth(addMonths(invoiceMonth, 1))} className="w-8 h-8 rounded-full flex items-center justify-center text-muted hover:text-paper hover:bg-white/5">›</button>
+              </div>
+            </label>
+          </div>
         )}
 
         {(showSource || showCategory) && (
@@ -185,6 +206,13 @@ export default function TransactionForm({ person, tx, initialType, onClose, onSa
               </label>
             )}
           </div>
+        )}
+
+        {isCashExpense && !editing && (
+          <label className="flex items-center gap-2.5 text-sm rounded-m border border-line px-3.5 py-3 cursor-pointer">
+            <input type="checkbox" className="w-4 h-4 accent-azure" checked={paidNow} onChange={(e) => setPaidNow(e.target.checked)} />
+            <span className="text-muted">Já paga (sai do caixa agora). Sem marcar, entra como <b className="text-paper font-medium">pendente</b>.</span>
+          </label>
         )}
 
         {canRepeat && (

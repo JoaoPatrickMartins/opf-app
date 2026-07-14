@@ -2,7 +2,7 @@ import { useEffect, useState, useCallback } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { api } from '../lib/api.js';
 import { useStore } from '../lib/store.jsx';
-import { formatDay, formatMonth } from '../lib/format.js';
+import { formatDay, formatMonth, formatBRL } from '../lib/format.js';
 import { Card, Label, Money, Empty, Button } from '../components/ui.jsx';
 import Icon, { categoryIcon } from '../components/Icon.jsx';
 import TransactionForm from '../components/TransactionForm.jsx';
@@ -40,9 +40,16 @@ export default function PersonDetail() {
     load(); refreshPeople(); refreshSources();
   }
   function onSaved() { setForm(null); load(); refreshPeople(); refreshSources(); }
+  async function markPaid(txId, paid) {
+    await api.post(`/transactions/${txId}/pay`, { paid });
+    load(); refreshPeople();
+  }
+  function payInvoice(inv) {
+    setForm({ initialType: 'payment', payFor: { source_id: inv.source_id, month, amount: inv.outstanding } });
+  }
 
   if (loading || !data) return <Empty>Carregando…</Empty>;
-  const { person, totals, bySource, byCategory } = data;
+  const { person, totals, bySource, byCategory, cardInvoices = [] } = data;
   const rows = tab === 'expenses' ? data.expenses : tab === 'incomes' ? data.incomes : data.transactions;
 
   return (
@@ -71,7 +78,7 @@ export default function PersonDetail() {
         <Stat label="Saldo de caixa" value={person.cash_balance} tone={person.cash_balance < 0 ? 'text-caution' : ''} />
         <Stat label="Gastos do mês" value={-totals.gastos} />
         <Stat label="Receitas do mês" value={totals.receitas} tone="text-positive" />
-        <Stat label="No cartão (a pagar)" value={-totals.gastos_cartao} tone="text-sky" />
+        <Stat label="No cartão (a pagar)" value={-totals.cartao_a_pagar} tone="text-sky" />
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-[1.5fr_1fr] gap-6 items-start">
@@ -108,11 +115,18 @@ export default function PersonDetail() {
                         {t.source_name && <span>· {t.source_name}</span>}
                         {t.category_name && <span>· {t.category_name}</span>}
                         {t.type === 'transfer' && !incoming && t.counterparty_name && <span>· para {t.counterparty_name}</span>}
+                        {t.type === 'expense' && t.is_paid === false && <span className="text-caution">· pendente</span>}
                       </div>
                     </div>
                     <Money value={positive ? t.amount : -t.amount} className={`text-sm font-semibold ${positive ? 'text-positive' : ''}`} />
                     {!incoming && (
-                      <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                      <div className="flex gap-1 items-center opacity-0 group-hover:opacity-100 transition-opacity">
+                        {t.type === 'expense' && t.source_type !== 'credit_card' && (
+                          <button onClick={() => markPaid(t.id, !t.is_paid)} title={t.is_paid ? 'Marcar como pendente' : 'Marcar como paga'}
+                            className={`text-[11px] px-1.5 whitespace-nowrap ${t.is_paid ? 'text-faint hover:text-paper' : 'text-positive hover:underline'}`}>
+                            {t.is_paid ? 'paga' : 'marcar paga'}
+                          </button>
+                        )}
                         <button onClick={() => setForm({ tx: t })} className="w-7 h-7 rounded-full flex items-center justify-center text-muted hover:text-paper hover:bg-white/5"><Icon name="edit" size={14} /></button>
                         <button onClick={() => remove(t.id)} className="w-7 h-7 rounded-full flex items-center justify-center text-muted hover:text-[#FF7B7B] hover:bg-white/5"><Icon name="trash" size={14} /></button>
                       </div>
@@ -127,15 +141,26 @@ export default function PersonDetail() {
         {/* Painéis: por cartão + por categoria */}
         <div className="flex flex-col gap-6">
           <Card>
-            <Label className="mb-4">Despesas por cartão</Label>
-            {bySource.length === 0 ? <p className="text-sm text-faint">Sem despesas.</p> : (
-              <div className="flex flex-col gap-2.5">
-                {bySource.map((s) => (
-                  <div key={s.source_id || 'cash'} className="flex justify-between items-center text-sm">
-                    <span className="text-muted flex items-center gap-2">
-                      <Icon name={s.source_type === 'credit_card' ? 'card' : 'wallet'} size={15} /> {s.source_name}
-                    </span>
-                    <Money value={-s.spent} className="font-medium" />
+            <Label className="mb-4">Faturas de cartão</Label>
+            {cardInvoices.length === 0 ? <p className="text-sm text-faint">Sem despesas em cartão neste mês.</p> : (
+              <div className="flex flex-col gap-3">
+                {cardInvoices.map((inv) => (
+                  <div key={inv.source_id} className="flex flex-col gap-1.5 pb-3 border-b border-line-soft last:border-0 last:pb-0">
+                    <div className="flex justify-between items-center text-sm">
+                      <span className="text-muted flex items-center gap-2"><Icon name="card" size={15} /> {inv.source_name}</span>
+                      <Money value={-inv.spent} className="font-medium" />
+                    </div>
+                    <div className="flex justify-between items-center gap-2">
+                      <span className="text-[11px] text-faint">
+                        {inv.paid > 0 && `pago ${formatBRL(inv.paid)} · `}
+                        {inv.outstanding > 0
+                          ? <span className="text-caution">a pagar {formatBRL(inv.outstanding)}</span>
+                          : <span className="text-positive">fatura paga ✓</span>}
+                      </span>
+                      {inv.outstanding > 0 && (
+                        <Button variant="ghost" className="!py-1 !px-2.5 text-xs flex-none" onClick={() => payInvoice(inv)}>Pagar</Button>
+                      )}
+                    </div>
                   </div>
                 ))}
               </div>
@@ -162,6 +187,7 @@ export default function PersonDetail() {
           person={person}
           tx={form.tx}
           initialType={form.initialType}
+          payFor={form.payFor}
           onClose={() => setForm(null)}
           onSaved={onSaved}
         />
