@@ -3,6 +3,10 @@ dist/
 .env
 *.log
 
+# Build do app desktop (Electron)
+release/
+build/icon.png
+
 # SQLite data (local, pessoal)
 backend/data/*.db
 backend/data/*.db-*

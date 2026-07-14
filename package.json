@@ -1,8 +1,10 @@
 {
   "name": "opf-app",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
   "description": "OPF — app pessoal de consciência financeira",
+  "author": "OPF",
+  "main": "desktop/main.cjs",
   "workspaces": [
     "backend",
     "frontend"
@@ -12,9 +14,70 @@
     "dev:backend": "npm run dev --workspace backend",
     "dev:frontend": "npm run dev --workspace frontend",
     "build": "npm run build --workspace frontend",
-    "start": "npm run start --workspace backend"
+    "start": "npm run start --workspace backend",
+    "icon": "node scripts/generate-icon.mjs",
+    "desktop:dev": "electron desktop/main.cjs",
+    "desktop:build": "npm run build && npm run icon && electron-builder --linux AppImage",
+    "desktop:release": "npm version patch --no-git-tag-version && npm run build && npm run icon && electron-builder --linux",
+    "desktop:build:win": "npm run build && npm run icon && electron-builder --win nsis",
+    "desktop:build:all": "npm run build && npm run icon && electron-builder --linux AppImage --win nsis"
   },
   "engines": {
     "node": ">=20"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "mongodb": "^6.12.0",
+    "multer": "^2.0.1",
+    "pdf-parse": "^1.1.1"
+  },
+  "build": {
+    "appId": "com.opf.app",
+    "productName": "OPF",
+    "asar": false,
+    "npmRebuild": false,
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "desktop/**/*",
+      "backend/src/**/*",
+      "backend/package.json",
+      "frontend/dist/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": ".env",
+        "to": ".env"
+      }
+    ],
+    "artifactName": "${productName}-${version}.${ext}",
+    "linux": {
+      "target": [
+        "AppImage",
+        "deb"
+      ],
+      "category": "Office",
+      "icon": "build/icon.png",
+      "maintainer": "OPF <opf@local>"
+    },
+    "win": {
+      "target": [
+        "nsis"
+      ],
+      "icon": "build/icon.png"
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false
+    }
+  },
+  "devDependencies": {
+    "electron": "^41.7.1",
+    "electron-builder": "^26.15.3"
   }
 }

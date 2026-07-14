@@ -3,9 +3,9 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import dotenv from 'dotenv';
 
-// .env mora na raiz do monorepo (mesmo caminho usado pelo index.js)
+// .env mora na raiz do monorepo (dev); no app empacotado, o caminho vem em OPF_ENV_PATH.
 const __dirname = dirname(fileURLToPath(import.meta.url));
-dotenv.config({ path: join(__dirname, '..', '..', '.env') });
+dotenv.config({ path: process.env.OPF_ENV_PATH || join(__dirname, '..', '..', '.env') });
 
 const URI = process.env.MONGODB_URI;
 const DB_NAME = process.env.MONGODB_DB || 'opf';

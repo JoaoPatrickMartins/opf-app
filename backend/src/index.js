@@ -6,8 +6,8 @@ import express from 'express';
 import cors from 'cors';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-// .env mora na raiz do monorepo
-dotenv.config({ path: join(__dirname, '..', '..', '.env') });
+// .env mora na raiz do monorepo (dev). No app empacotado (Electron), o caminho vem em OPF_ENV_PATH.
+dotenv.config({ path: process.env.OPF_ENV_PATH || join(__dirname, '..', '..', '.env') });
 
 import { connect, initSchema } from './db.js';
 import peopleRouter from './routes/people.js';
@@ -36,8 +36,9 @@ app.use('/api/recurring', recurringRouter);
 app.use('/api/export', exportRouter);
 app.use('/api/ai', aiRouter);
 
-// Servir build estático do frontend, se existir
-const frontendDist = join(__dirname, '..', '..', 'frontend', 'dist');
+// Servir build estático do frontend, se existir (dev/produção). No app empacotado
+// (Electron) o caminho vem em OPF_STATIC_DIR.
+const frontendDist = process.env.OPF_STATIC_DIR || join(__dirname, '..', '..', 'frontend', 'dist');
 if (existsSync(frontendDist)) {
   app.use(express.static(frontendDist));
   app.get('*', (req, res, next) => {
@@ -52,16 +53,28 @@ app.use((err, _req, res, _next) => {
   res.status(err.status || 500).json({ error: err.message || 'Erro interno' });
 });
 
-const PORT = process.env.BACKEND_PORT || process.env.PORT || 3001;
-
 // Bootstrap: conecta ao MongoDB e prepara índices/seeds antes de aceitar requisições.
-try {
+// Retorna a porta REAL (BACKEND_PORT=0 → porta livre efêmera, usada pelo app desktop).
+export async function startServer() {
   await connect();
   await initSchema();
-  app.listen(PORT, () => {
-    console.log(`OPF backend rodando em http://localhost:${PORT}`);
+  const requested = Number(process.env.BACKEND_PORT || process.env.PORT || 3001);
+  return new Promise((resolve, reject) => {
+    const server = app.listen(requested, () => {
+      const port = server.address().port;
+      console.log(`OPF backend rodando em http://localhost:${port}`);
+      resolve({ server, port });
+    });
+    server.on('error', reject);
   });
-} catch (err) {
-  console.error('Falha ao iniciar o backend (MongoDB):', err.message);
-  process.exit(1);
+}
+
+export { app };
+
+// Execução direta (dev): `node src/index.js`. Quando importado (Electron), NÃO auto-inicia.
+if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
+  startServer().catch((err) => {
+    console.error('Falha ao iniciar o backend (MongoDB):', err.message);
+    process.exit(1);
+  });
 }
