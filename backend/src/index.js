@@ -52,7 +52,7 @@ app.use((err, _req, res, _next) => {
   res.status(err.status || 500).json({ error: err.message || 'Erro interno' });
 });
 
-const PORT = process.env.PORT || 3001;
+const PORT = process.env.BACKEND_PORT || process.env.PORT || 3001;
 
 // Bootstrap: conecta ao MongoDB e prepara índices/seeds antes de aceitar requisições.
 try {
